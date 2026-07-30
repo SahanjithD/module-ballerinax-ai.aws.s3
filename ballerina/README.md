@@ -6,8 +6,8 @@ ready to be chunked, embedded, and indexed for retrieval-augmented generation (R
 
 It implements the `ai:DataLoader` abstraction, so it can be used anywhere an `ai:DataLoader` is
 expected and its output feeds directly into `ai:KnowledgeBase.ingest`. Natively-textual objects are
-decoded directly; PDF, Word (`.docx`) and PowerPoint (`.pptx`) documents have their text extracted
-**in memory** — object content is never written to disk.
+decoded directly; PDF, Word (`.docx`), PowerPoint (`.pptx`) and Excel (`.xlsx`) documents have their
+text extracted **in memory** — object content is never written to disk.
 
 ## Prerequisites
 
@@ -228,8 +228,8 @@ natively-textual formats S3 buckets commonly hold.
 | PDF | `pdf` | Apache Tika `PDFParser` + PDFBox, in memory |
 | Word | `docx` | Apache POI `XWPFWordExtractor`, in memory |
 | PowerPoint | `pptx` | Apache POI `SlideShowExtractor`, in memory |
-| **Legacy binary Office** | `doc`, `ppt` | **Not supported** — convert to `.docx` / `.pptx` or PDF |
-| **Spreadsheets** | `xls`, `xlsx` | **Not supported** — tabular extraction is out of scope; export to `.csv` |
+| Excel | `xlsx` | Apache POI `XSSFExcelExtractor`, in memory — tab-separated cells, one row per line, each sheet prefixed with its name |
+| **Legacy binary Office** | `doc`, `ppt`, `xls` | **Not supported** — convert to the OOXML `.docx` / `.pptx` / `.xlsx` or PDF |
 | Anything else | images, audio, unknown binary | Skipped (an error if named explicitly) |
 
 Object metadata is attached to every document: `fileName` (the key), `mimeType`, `fileSize`,
@@ -258,12 +258,11 @@ Please read these before indexing a large or busy bucket.
   corpus cannot be pinned to specific object versions.
 - **An exact key is resolved by listing its prefix**, not with a `HEAD`, to avoid a download just
   to test existence. Functionally transparent; noted for cost accounting on very large prefixes.
-- **Legacy binary Office and spreadsheets are unsupported.** `.doc`, `.ppt`, `.xls` and `.xlsx`
-  are recognised only so they can be rejected with a format-specific message or skipped. This
-  matches `ballerina/ai`. Convert `.doc`/`.ppt` to `.docx`/`.pptx` or PDF; export spreadsheets to
-  `.csv`, which is read as text. (Note `.xlsx` is unsupported despite being OOXML like the
-  supported `.docx`/`.pptx` — extracting meaningful text from a spreadsheet is a different
-  problem, not a format-support gap.)
+- **Legacy binary Office formats are unsupported.** `.doc`, `.ppt` and `.xls` are recognised only
+  so they can be rejected with a format-specific message or skipped. Convert them to their OOXML
+  successors (`.docx`/`.pptx`/`.xlsx`) or PDF. The OOXML `.xlsx` is extracted via POI's
+  `XSSFExcelExtractor`: cells are rendered tab-separated, one row per line, each sheet prefixed with
+  its name, and formula cells contribute their last cached result.
 - **One unreadable object fails the whole load.** If an object is deleted between being listed
   and being downloaded, or its content cannot be decoded or parsed, the entire `load()` returns an
   error rather than skipping it. This is deliberate — a silently incomplete RAG index is worse
