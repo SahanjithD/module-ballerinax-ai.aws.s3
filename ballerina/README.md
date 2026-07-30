@@ -23,8 +23,10 @@ The loader authenticates in one of two ways:
 - **Static credentials** — an access key pair for an IAM user or role, optionally with a session
   token for temporary (STS) credentials. See
   [Managing access keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html).
-- **EC2/ECS IAM role** — no keys at all; credentials are resolved from the instance metadata
-  service. This works only when running on AWS infrastructure with an attached instance or task role.
+- **EC2/ECS IAM role** — no keys at all; credentials are resolved from the AWS infrastructure the
+  code runs on. An ECS task role is resolved through the ECS container credential endpoint, while an
+  EC2 instance profile is resolved through the EC2 Instance Metadata Service (IMDS). This works only
+  when running on AWS infrastructure with an attached instance or task role.
 
 ### 3. Grant the required IAM permissions
 
@@ -244,15 +246,17 @@ Please read these before indexing a large or busy bucket.
   document, because `ai:DataLoader.load()` returns a `Document[]` — there is no streaming or cursor
   in the interface. A very large prefix therefore produces a correspondingly large in-memory
   result. Narrow the `path`, or split the work across several loads, if that is a concern.
-- **A listing is not a consistent snapshot.** S3 listings are eventually consistent and returned
-  in key order, and the loader pages through them. Under concurrent writes, objects added or
-  removed mid-load can be missed or double-counted — inherent to paginated listing.
+- **A listing is not a consistent snapshot.** S3 read and list operations are strongly consistent,
+  but a paginated load is not an atomic snapshot: the loader pages through a listing, and concurrent
+  writes across page requests can cause objects to be missed or double-counted — inherent to
+  paginated listing.
 - **Each object is read entirely into memory.** Extraction reads from an in-memory buffer so that
   no temporary file is ever written, but each object must therefore fit in the heap. `maxObjectSize`
-  (default 100 MiB) bounds this; a larger object is a clear error, not an out-of-memory crash.
-- **Non-recursive filtering happens client-side.** The loader lists without a `delimiter` and
-  filters nested keys itself, so `recursive: false` still *lists* every key under the prefix and
-  discards the nested ones. On a wide prefix this costs listing bandwidth — prefer a narrower `path`.
+  (default 100 MiB) bounds each individual object read; an object larger than that is a clear error
+  rather than an attempted load.
+- **Non-recursive filtering.** The loader lists with delimiter `/`, so S3 returns only same-level
+  keys (descendants roll into `CommonPrefixes`, which the connector drops); a client-side filter
+  stays as a backstop.
 - **No `versionId` selection.** The loader always reads the current version of each object. The
   underlying connector *can* fetch a specific version, but the loader does not expose it, so a
   corpus cannot be pinned to specific object versions.

@@ -259,10 +259,11 @@ isolated function includeInPrefixWalk(S3Item item, string prefix, boolean recurs
         return false;
     }
     if !recursive {
-        // Non-recursive listing uses no delimiter (passing one would silently drop
-        // CommonPrefixes, which the connector's S3Object[] cannot represent), so nested
-        // keys are filtered client-side: anything with a further '/' after the prefix is a
-        // descendant of a sub-prefix and is skipped.
+        // Non-recursive listing passes delimiter "/", so S3 already rolls descendant keys into
+        // CommonPrefixes (which the connector's S3Object[] cannot represent and so drops) and
+        // returns only same-level objects. This client-side check is a belt-and-braces backstop:
+        // anything with a further '/' after the prefix is a descendant of a sub-prefix and is
+        // skipped.
         string remainder = key.startsWith(prefix) ? key.substring(prefix.length()) : key;
         if remainder.startsWith("/") {
             remainder = remainder.substring(1);
