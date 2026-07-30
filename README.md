@@ -27,12 +27,15 @@ Please read these before indexing a large or busy bucket.
   SharePoint data loader); the loader paginates across every listing page and materializes every
   document, because `ai:DataLoader.load()` returns a `Document[]` with no streaming. A very large
   prefix produces a correspondingly large in-memory result — narrow the `path` if that matters.
-- **A listing is not a consistent snapshot.** S3 listings are eventually consistent and key-ordered;
-  under concurrent writes, objects added or removed mid-load can be missed or double-counted.
+- **A listing is not a consistent snapshot.** S3 read and list operations are strongly consistent,
+  but a paginated load is not an atomic snapshot: concurrent writes across page requests can cause
+  objects to be missed or double-counted.
 - **Each object is read entirely into memory,** so that no temporary file is ever written.
-  `maxObjectSize` (default 100 MiB) bounds this; a larger object is a clear error, not an OOM crash.
-- **Non-recursive filtering happens client-side** — `recursive: false` still lists every key under
-  the prefix and discards the nested ones, costing listing bandwidth on a wide prefix.
+  `maxObjectSize` (default 100 MiB) bounds each individual object read; an object larger than that is
+  a clear error rather than an attempted load.
+- **Non-recursive filtering** — `recursive: false` lists with delimiter `/`, so S3 returns only
+  same-level keys (descendants roll into `CommonPrefixes`, which the connector drops); a client-side
+  filter stays as a backstop.
 - **No `versionId` selection, no requester-pays, AWS endpoints only.** The loader reads current
   object versions; requester-pays buckets and S3-compatible endpoints (MinIO, LocalStack, R2) are
   not supported by the connector's configuration.
@@ -43,9 +46,6 @@ Please read these before indexing a large or busy bucket.
 - **All buckets in one loader share one region**, since `region` is set on the connection.
 - **One unreadable object fails the whole load** — deliberately, since a silently incomplete RAG
   index is worse than a failed one. Objects of unsupported *types* are skipped, not failed.
-- **No `versionId` and no requester-pays support**, as neither can be expressed through the
-  connector.
-- **AWS endpoints only** — S3-compatible services (MinIO, LocalStack, R2) cannot be targeted.
 
 ## Issues and projects
 

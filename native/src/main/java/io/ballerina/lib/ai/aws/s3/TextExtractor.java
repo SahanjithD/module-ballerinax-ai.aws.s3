@@ -115,10 +115,13 @@ public final class TextExtractor {
      * @return the extracted text as a {@link BString}, or a Ballerina error on failure
      */
     public static Object extractDocxText(BArray content, BString fileName) {
-        // The extractor owns and closes the OPCPackage, so it must not also be closed here:
-        // a second close makes POI log a spurious warning on every extraction.
+        // Own the OPCPackage as the closable resource so it is released even if the extractor's
+        // constructor fails while parsing malformed (untrusted) input. The extractor is not closed
+        // separately: doing so would close the package a second time and make POI log a spurious
+        // warning on every extraction.
         try (InputStream stream = new ByteArrayInputStream(content.getBytes());
-             XWPFWordExtractor extractor = new XWPFWordExtractor(OPCPackage.open(stream))) {
+             OPCPackage pkg = OPCPackage.open(stream)) {
+            XWPFWordExtractor extractor = new XWPFWordExtractor(pkg);
             return StringUtils.fromString(extractor.getText());
         } catch (Throwable t) {
             return toBallerinaError(t);
@@ -134,9 +137,12 @@ public final class TextExtractor {
      * @return the extracted text as a {@link BString}, or a Ballerina error on failure
      */
     public static Object extractPptxText(BArray content, BString fileName) {
-        // As above, the extractor closes the slide show it wraps.
+        // As with .docx, own the slide show as the closable resource so it is released even if the
+        // extractor's constructor fails; the extractor is not closed separately (that would close
+        // the slide show a second time).
         try (InputStream stream = new ByteArrayInputStream(content.getBytes());
-             SlideShowExtractor<?, ?> extractor = new SlideShowExtractor<>(new XMLSlideShow(stream))) {
+             XMLSlideShow slideShow = new XMLSlideShow(stream)) {
+            SlideShowExtractor<?, ?> extractor = new SlideShowExtractor<>(slideShow);
             return StringUtils.fromString(extractor.getText());
         } catch (Throwable t) {
             return toBallerinaError(t);
@@ -157,10 +163,12 @@ public final class TextExtractor {
      * @return the extracted text as a {@link BString}, or a Ballerina error on failure
      */
     public static Object extractXlsxText(BArray content, BString fileName) {
-        // As with .docx/.pptx, the extractor closes the workbook (and its OPC package) it wraps,
-        // so it must not be closed a second time here.
+        // As with .docx/.pptx, own the workbook (and its OPC package) as the closable resource so it
+        // is released even if the extractor's constructor fails; the extractor is not closed
+        // separately (that would close the workbook a second time).
         try (InputStream stream = new ByteArrayInputStream(content.getBytes());
-             XSSFExcelExtractor extractor = new XSSFExcelExtractor(new XSSFWorkbook(stream))) {
+             XSSFWorkbook workbook = new XSSFWorkbook(stream)) {
+            XSSFExcelExtractor extractor = new XSSFExcelExtractor(workbook);
             extractor.setIncludeSheetNames(true);
             return StringUtils.fromString(extractor.getText());
         } catch (Throwable t) {

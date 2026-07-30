@@ -158,7 +158,11 @@ isolated function extractXlsxText(byte[] content, string fileName) returns strin
 // key extension. S3 object listings carry no Content-Type, so in practice classification is
 // by extension; the `mimeType` parameter is honoured when a caller has one.
 isolated function classify(string fileName, string? mimeType) returns DocumentKind {
-    string mime = (mimeType ?: "").toLowerAscii();
+    // Drop any media-type parameters (e.g. "; charset=utf-8") before comparing against the bare
+    // MIME constants and tables, which hold no parameters.
+    string rawMime = (mimeType ?: "").toLowerAscii();
+    int? semicolon = rawMime.indexOf(";");
+    string mime = (semicolon is int ? rawMime.substring(0, semicolon) : rawMime).trim();
     string extension = getExtension(fileName);
     if mime.startsWith("text/") || (mime != "" && TEXT_MIME_TYPES.indexOf(mime) !is ())
             || TEXT_EXTENSIONS.indexOf(extension) !is () {
@@ -305,7 +309,8 @@ final readonly & string[] TEXT_MIME_TYPES = [
     "application/javascript",
     "application/x-yaml",
     "application/yaml",
-    "application/csv"
+    "application/csv",
+    "application/typescript"
 ];
 
 // Key extensions treated as natively textual (decoded directly, matching `ai`'s handling of

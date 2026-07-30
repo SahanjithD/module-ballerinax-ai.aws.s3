@@ -58,21 +58,6 @@ accessToken = "<ACCESS_TOKEN>"
 
 ## Run the example
 
-The examples resolve the loader from the **local** Ballerina repository, so publish it there once
-before running (from the repository root):
-
-```bash
-./gradlew clean build -PpublishToLocalCentral=true
-```
-
-If you do not have a GitHub token for the Gradle build, publish with the `bal` CLI instead:
-
-```bash
-cd ballerina && bal pack && bal push --repository=local
-```
-
-Then run the example:
-
 ```bash
 cd examples/rag-pipeline
 bal run
@@ -80,7 +65,7 @@ bal run
 
 ## Expected output
 
-```
+```text
 Loaded documents from S3.
 Ingested the corpus into the knowledge base.
 
