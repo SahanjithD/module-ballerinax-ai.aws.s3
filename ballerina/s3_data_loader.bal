@@ -154,6 +154,8 @@ public isolated class TextDataLoader {
         string? effectivePrefix = prefix == "" ? () : prefix;
         string? delimiter = recursive ? () : "/";
         string? continuationToken = ();
+        // The final key of the previous non-empty page, used to prove the listing is advancing.
+        string? previousPageLastKey = ();
         while true {
             S3Page page = check listObjectPage(self.s3Client, bucket, effectivePrefix, delimiter,
                     continuationToken, MAX_KEYS_PER_PAGE);
@@ -178,12 +180,24 @@ public isolated class TextDataLoader {
                     (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
                     string ` is truncated but returned no continuation token, so it cannot be fully read.`);
             }
-            if nextToken == continuationToken {
-                // The next token equals the one that produced this page — advancing would re-fetch
-                // the same page forever. Bail rather than loop unbounded. Not expected in practice.
-                return error ai:Error(string `Listing for bucket '${bucket}'` +
-                    (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
-                    string ` returned a repeated continuation token, so it cannot be fully read.`);
+            // Prove the listing is advancing before asking for another page. Comparing
+            // continuation tokens cannot do this: S3 mints a fresh token for every response, so
+            // two identical requests yield two different tokens and a token comparison never
+            // fires — which is how a listing that re-fetched page one forever once went
+            // undetected. Object keys are unique within a listing, so the same final key on two
+            // consecutive pages means no progress was made. Empty pages are skipped rather than
+            // compared: a non-recursive walk of a folder-heavy prefix legitimately returns pages
+            // holding nothing but CommonPrefixes, which the connector does not surface.
+            int pageSize = page.items.length();
+            if pageSize > 0 {
+                string lastKey = page.items[pageSize - 1].key;
+                if lastKey == previousPageLastKey {
+                    return error ai:Error(string `Listing for bucket '${bucket}'` +
+                        (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
+                        string ` is not advancing: two consecutive pages ended at the same key ` +
+                        string `('${lastKey}'), so the listing cannot be fully read.`);
+                }
+                previousPageLastKey = lastKey;
             }
             continuationToken = nextToken;
         }
