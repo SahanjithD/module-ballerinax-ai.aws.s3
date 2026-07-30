@@ -83,7 +83,13 @@ isolated function listObjectPage(s3:Client s3Client, string bucket, string? pref
     if continuationToken is string {
         config.continuationToken = continuationToken;
     }
-    s3:ListObjectsResponse|s3:Error listing = s3Client->listObjects(bucket, ...[config]);
+    // Passed positionally. `listObjects` takes an included record parameter
+    // (`*ListObjectsConfig`), and on Ballerina 2201.12 a rest-argument spread against one —
+    // `listObjects(bucket, ...[config])` — compiles cleanly but delivers an empty record to
+    // the callee, silently dropping prefix/delimiter/continuationToken. That turned every
+    // call into an unfiltered whole-bucket listing whose paging never terminated, because
+    // each response carried a fresh continuation token. Do not reintroduce the spread form.
+    s3:ListObjectsResponse|s3:Error listing = s3Client->listObjects(bucket, config);
     if listing is s3:Error {
         return error ai:Error(
             string `Failed to list objects in bucket '${bucket}'` +
