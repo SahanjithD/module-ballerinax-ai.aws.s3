@@ -267,17 +267,6 @@
     ]
   },
   {
-    "name": "org.ballerinalang.test.runtime.BTestMain",
-    "methods": [
-      {
-        "name": "main",
-        "parameterTypes": [
-          "java.lang.String[]"
-        ]
-      }
-    ]
-  },
-  {
     "name": "sun.awt.image.IntegerComponentRaster",
     "fields": [
       {

@@ -164,27 +164,51 @@ isolated function classify(string fileName, string? mimeType) returns DocumentKi
     int? semicolon = rawMime.indexOf(";");
     string mime = (semicolon is int ? rawMime.substring(0, semicolon) : rawMime).trim();
     string extension = getExtension(fileName);
-    if mime.startsWith("text/") || (mime != "" && TEXT_MIME_TYPES.indexOf(mime) !is ())
-            || TEXT_EXTENSIONS.indexOf(extension) !is () {
+    // A supplied MIME type is decided first, and on its own. Folding the extension into the same
+    // condition let the key win whenever it looked textual, so `classify("report.txt",
+    // "application/pdf")` returned PLAIN_TEXT — contradicting this function's own contract that an
+    // explicit MIME type is honoured. A caller that knows the media type knows better than the key.
+    if mime != "" {
+        if mime.startsWith("text/") || TEXT_MIME_TYPES.indexOf(mime) !is () {
+            return PLAIN_TEXT;
+        }
+        if mime == "application/pdf" {
+            return PDF;
+        }
+        if mime == DOCX_MIME_TYPE {
+            return DOCX;
+        }
+        if mime == PPTX_MIME_TYPE {
+            return PPTX;
+        }
+        if mime == XLSX_MIME_TYPE {
+            return XLSX;
+        }
+        if UNSUPPORTED_OFFICE_MIME_TYPES.indexOf(mime) !is () {
+            return UNSUPPORTED_OFFICE;
+        }
+        // An unrecognised MIME type carries no information, so fall through to the extension
+        // rather than declaring the object unsupported on the strength of a value we do not know.
+    }
+    if TEXT_EXTENSIONS.indexOf(extension) !is () {
         return PLAIN_TEXT;
     }
-    if mime == "application/pdf" || extension == "pdf" {
+    if extension == "pdf" {
         return PDF;
     }
-    if mime == DOCX_MIME_TYPE || extension == "docx" {
+    if extension == "docx" {
         return DOCX;
     }
-    if mime == PPTX_MIME_TYPE || extension == "pptx" {
+    if extension == "pptx" {
         return PPTX;
     }
-    if mime == XLSX_MIME_TYPE || extension == "xlsx" {
+    if extension == "xlsx" {
         return XLSX;
     }
     // The remaining Office formats are recognised solely so they can be rejected with a clear
     // message (named keys) or skipped (prefix walks) — the loader extracts text from PDF, .docx,
     // .pptx and .xlsx only, not the legacy binary .doc/.ppt/.xls formats.
-    if (mime != "" && UNSUPPORTED_OFFICE_MIME_TYPES.indexOf(mime) !is ())
-            || UNSUPPORTED_OFFICE_EXTENSIONS.indexOf(extension) !is () {
+    if UNSUPPORTED_OFFICE_EXTENSIONS.indexOf(extension) !is () {
         return UNSUPPORTED_OFFICE;
     }
     return UNSUPPORTED;

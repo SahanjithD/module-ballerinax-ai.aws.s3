@@ -431,3 +431,37 @@ isolated function testClassificationPrefersMimeTypeWhenSupplied() {
     test:assertEquals(classify("noextension",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), XLSX);
 }
+
+// The case the test above cannot reach: a key whose extension *disagrees* with the supplied MIME
+// type. Every assertion here failed before the MIME checks were separated from the extension
+// checks — the text-extension test was OR-ed into the first condition, so a `.txt`/`.md`/`.csv`
+// key returned PLAIN_TEXT regardless of what the caller said the media type was.
+@test:Config {}
+isolated function testSuppliedMimeTypeBeatsAConflictingExtension() {
+    test:assertEquals(classify("report.txt", "application/pdf"), PDF,
+            "An explicit application/pdf must win over a .txt key");
+    test:assertEquals(classify("notes.md", DOCX_MIME_TYPE), DOCX,
+            "An explicit .docx media type must win over a .md key");
+    test:assertEquals(classify("data.csv", XLSX_MIME_TYPE), XLSX,
+            "An explicit .xlsx media type must win over a .csv key");
+    test:assertEquals(classify("readme.txt", "application/msword"), UNSUPPORTED_OFFICE,
+            "An explicit legacy-Office media type must win over a .txt key");
+    test:assertEquals(classify("report.pdf", "text/plain"), PLAIN_TEXT,
+            "Precedence holds in both directions, not only towards the binary formats");
+}
+
+// A media type the loader does not recognise carries no information, so the key still decides
+// rather than the object being written off as unsupported.
+@test:Config {}
+isolated function testUnrecognisedMimeTypeFallsBackToTheExtension() {
+    test:assertEquals(classify("report.pdf", "application/octet-stream"), PDF);
+    test:assertEquals(classify("notes.md", "binary/octet-stream"), PLAIN_TEXT);
+    test:assertEquals(classify("photo.png", "application/octet-stream"), UNSUPPORTED);
+}
+
+// Media-type parameters must not defeat the precedence rule either.
+@test:Config {}
+isolated function testMimeTypeParametersAreStrippedBeforeComparison() {
+    test:assertEquals(classify("report.txt", "application/pdf; version=1.7"), PDF);
+    test:assertEquals(classify("noextension", "text/markdown; charset=utf-8"), PLAIN_TEXT);
+}
