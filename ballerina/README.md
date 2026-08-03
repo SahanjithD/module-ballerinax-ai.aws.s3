@@ -246,6 +246,24 @@ Please read these before indexing a large or busy bucket.
   document, because `ai:DataLoader.load()` returns a `Document[]` — there is no streaming or cursor
   in the interface. A very large prefix therefore produces a correspondingly large in-memory
   result. Narrow the `path`, or split the work across several loads, if that is a concern.
+- **A prefix walk is bounded at 10,000 listing pages.** That ceiling is a safety net, not a document
+  cap: it guarantees the walk terminates whatever the listing returns, and reaching it is an error
+  rather than a partial corpus. Ten thousand pages covers ten million listed entries — counting both
+  objects and, for a non-recursive walk, the sub-folders S3 rolls into CommonPrefixes — so no
+  listing this loader could return in memory comes close. A walk that hits it needs a narrower
+  `path`.
+- **Skipped objects are reported only to the log.** Archived, over-sized, undecodable and
+  unsupported objects are skipped with a warning so that one bad object cannot fail a whole corpus,
+  but `load()` returns a shorter array with no programmatic signal. A caller cannot distinguish
+  "nothing matched" from "several objects were skipped" without reading the logs.
+- **`load()` has no overall time limit.** The paging loop always terminates, but `ballerinax/aws.s3`
+  5.0.0 exposes no timeout, retry or HTTP configuration on `ConnectionConfig`, so a stalled
+  connection blocks the call indefinitely. Apply a deadline on the calling side if you need one.
+- **S3 Express One Zone (directory) buckets are not usable.** Every object in one reports the
+  `EXPRESS_ONEZONE` storage class, which is absent from the connector's `StorageClass` enum, so
+  listing and metadata calls fail to deserialize. The exact-key path is designed to work on them —
+  HEAD is order-independent, which unordered directory-bucket listings require — and needs no change
+  here once the connector is fixed.
 - **A listing is not a consistent snapshot.** S3 read and list operations are strongly consistent,
   but a paginated load is not an atomic snapshot: the loader pages through a listing, and concurrent
   writes across page requests can cause objects to be missed or double-counted — inherent to
