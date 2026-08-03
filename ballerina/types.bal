@@ -14,13 +14,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import ballerinax/aws.s3;
-
-# How the loader authenticates to S3 and which region it targets. A local alias for the
-# connector's `s3:ConnectionConfig`, so callers can name the type as `ConnectionConfig` without
-# importing `ballerinax/aws.s3` (which would collide with this package on the default `s3` prefix).
-public type ConnectionConfig s3:ConnectionConfig;
-
 # A rule selecting what to load from a bucket. S3 has no real folders, so `path` is
 # interpreted against key prefixes (see the README's "How paths are resolved").
 public type Target record {|
@@ -47,7 +40,7 @@ public type Target record {|
 # A single S3 bucket together with the targets to load from it. Several sources may be
 # configured per loader; their documents are aggregated in the order given.
 public type Source record {|
-    # The name of the S3 bucket. It must live in the region set on `ConnectionConfig`, which
+    # The name of the S3 bucket. It must live in the region set on `s3:ConnectionConfig`, which
     # is shared by every source — a bucket in a different region fails with an opaque AWS
     # redirect error, so use one loader per region
     string bucket;

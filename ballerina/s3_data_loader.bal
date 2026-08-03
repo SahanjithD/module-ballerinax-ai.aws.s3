@@ -23,6 +23,17 @@ import ballerinax/aws.s3;
 // prefix walk requests the maximum to minimise round-trips, then pages via the continuation token.
 const int MAX_KEYS_PER_PAGE = 1000;
 
+// The ceiling on how many pages one prefix walk will fetch. This is the loop's termination
+// proof — the last-key check below is a fast diagnostic, but only a page count bounds *every*
+// possible response sequence, including a run of object-less pages that offers no key to compare.
+//
+// 10,000 pages covers ten million listed entries. A recursive walk cannot usefully return that
+// many (every document is held in memory), so the binding case is a non-recursive walk over a
+// prefix with millions of sub-folders, whose CommonPrefixes consume the page budget invisibly;
+// ten million of those still fits. Raising it much further would not protect a larger real
+// listing, only lengthen how long a stuck one spins before reporting.
+const int MAX_LIST_PAGES = 10000;
+
 # A data loader that reads objects from AWS S3 buckets as text for a RAG ingestion
 # pipeline. It implements `ai:DataLoader`, so what it loads feeds directly into
 # `ai:KnowledgeBase.ingest`.
@@ -42,12 +53,13 @@ public isolated class TextDataLoader {
 
     # Initializes the AWS S3 data loader.
     #
-    # + s3 - Either a `ConnectionConfig` describing how to reach S3 (the loader builds the
-    #        client from it), or an already-configured `s3:Client` to reuse
+    # + s3Connection - Either an `s3:ConnectionConfig` describing how to reach S3 (the loader
+    #                  builds the client from it), or an already-configured `s3:Client` to reuse
     # + sources - One or more buckets, each with the targets (prefixes/keys) to load
     # + options - Loader-wide options: the in-memory per-object size ceiling
     # + return - An `ai:Error` if the configuration is invalid or the client cannot be built
-    public isolated function init(@display {label: "Connection Config"} ConnectionConfig|s3:Client s3,
+    public isolated function init(
+            @display {label: "Connection Config"} s3:ConnectionConfig|s3:Client s3Connection,
             @display {label: "Data Sources"} Source[] sources,
             @display {label: "Loader Options"} LoaderOptions options = {}) returns ai:Error? {
         if sources.length() == 0 {
@@ -56,7 +68,7 @@ public isolated class TextDataLoader {
         if options.maxObjectSize < 1 {
             return error ai:Error("maxObjectSize must be at least 1");
         }
-        self.s3Client = s3 is s3:Client ? s3 : check buildS3Client(s3);
+        self.s3Client = s3Connection is s3:Client ? s3Connection : check buildS3Client(s3Connection);
         self.sources = sources.cloneReadOnly();
         self.maxObjectSize = options.maxObjectSize;
     }
@@ -89,14 +101,30 @@ public isolated class TextDataLoader {
             return self.loadPrefix(bucket, path, target.recursive, target.includeExtensions);
         }
         S3Item? exact = check self.findExactKey(bucket, path);
-        if exact is S3Item {
+        // A zero-byte object keyed exactly as the path may be a folder marker rather than a
+        // document — `aws s3api put-object --key reports` creates one — and rejecting it as an
+        // unsupported type failed the whole load instead of walking `reports/`. Such a key is
+        // therefore treated as a marker and falls through to the prefix walk. An object that
+        // carries content is always resolved as the named key, so an unsupported one still fails
+        // loudly.
+        boolean markerCandidate = exact is S3Item && exact.size == 0
+            && classify(exact.key, ()) is UNSUPPORTED|UNSUPPORTED_OFFICE;
+        if exact is S3Item && !markerCandidate {
             return [check self.loadExactKey(bucket, exact)];
         }
         // Exact-key miss: treat the value as a folder prefix. Append "/" so it matches the
         // folder's contents rather than sibling prefixes (e.g. "reports" must not also match
         // "reports-archive/"), and so a non-recursive walk — which now passes delimiter="/" —
         // still sees the folder's same-level objects instead of rolling them into a CommonPrefix.
-        return self.loadPrefix(bucket, path + "/", target.recursive, target.includeExtensions);
+        ai:Document[] documents =
+            check self.loadPrefix(bucket, path + "/", target.recursive, target.includeExtensions);
+        if documents.length() == 0 && exact is S3Item {
+            // The key was a marker candidate but names no folder either, so it was simply an empty
+            // object of an unsupported type. Report that rather than returning nothing: the caller
+            // named this key, and a silent empty result would hide the reason from them.
+            return [check self.loadExactKey(bucket, exact)];
+        }
+        return documents;
     }
 
     // Resolves an exact key with HEAD requests (no download), returning the item if it exists or
@@ -154,11 +182,30 @@ public isolated class TextDataLoader {
         string? effectivePrefix = prefix == "" ? () : prefix;
         string? delimiter = recursive ? () : "/";
         string? continuationToken = ();
-        // The final key of the previous non-empty page, used to prove the listing is advancing.
+        // The final key of the previous object-bearing page. ListObjectsV2 never returns a key
+        // twice within one listing, so seeing the same key end two pages means the listing is not
+        // advancing — which catches the realistic stuck shape (page one re-served forever) on the
+        // very next page instead of after the ceiling. Deliberately O(1): tracking every key seen
+        // would catch more exotic sequences that S3 cannot produce, at the cost of a map growing
+        // with every key listed, which on a multi-million-object bucket is hundreds of megabytes.
         string? previousPageLastKey = ();
+        // Pages fetched so far, bounded by MAX_LIST_PAGES whatever the server returns.
+        int pagesFetched = 0;
         while true {
             S3Page page = check listObjectPage(self.s3Client, bucket, effectivePrefix, delimiter,
                     continuationToken, MAX_KEYS_PER_PAGE);
+            pagesFetched += 1;
+            int pageSize = page.items.length();
+            if pageSize > 0 {
+                string lastKey = page.items[pageSize - 1].key;
+                if lastKey == previousPageLastKey {
+                    return error ai:Error(string `Listing for bucket '${bucket}'` +
+                        (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
+                        string ` is not advancing: two consecutive pages ended at the same key ` +
+                        string `('${lastKey}'), so the listing cannot be fully read.`);
+                }
+                previousPageLastKey = lastKey;
+            }
             foreach S3Item item in page.items {
                 if !includeInPrefixWalk(item, prefix, recursive, includeExtensions) {
                     continue;
@@ -180,24 +227,24 @@ public isolated class TextDataLoader {
                     (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
                     string ` is truncated but returned no continuation token, so it cannot be fully read.`);
             }
-            // Prove the listing is advancing before asking for another page. Comparing
-            // continuation tokens cannot do this: S3 mints a fresh token for every response, so
-            // two identical requests yield two different tokens and a token comparison never
-            // fires — which is how a listing that re-fetched page one forever once went
-            // undetected. Object keys are unique within a listing, so the same final key on two
-            // consecutive pages means no progress was made. Empty pages are skipped rather than
-            // compared: a non-recursive walk of a folder-heavy prefix legitimately returns pages
-            // holding nothing but CommonPrefixes, which the connector does not surface.
-            int pageSize = page.items.length();
-            if pageSize > 0 {
-                string lastKey = page.items[pageSize - 1].key;
-                if lastKey == previousPageLastKey {
-                    return error ai:Error(string `Listing for bucket '${bucket}'` +
-                        (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
-                        string ` is not advancing: two consecutive pages ended at the same key ` +
-                        string `('${lastKey}'), so the listing cannot be fully read.`);
-                }
-                previousPageLastKey = lastKey;
+            // The last-key check above catches a stuck listing as soon as it re-serves a page,
+            // but it cannot see a run of object-less pages — and those are legitimate: a
+            // non-recursive walk of a folder-heavy prefix returns pages holding nothing but
+            // CommonPrefixes, which the connector does not surface though they still consume the
+            // page's key budget. With the default `Target` (`path: ""`, `recursive: false`), a
+            // bucket organised as one prefix per tenant produces exactly that, so capping
+            // consecutive empty pages would fail a perfectly good listing. The page ceiling bounds
+            // that path instead, and is what makes this loop terminate for *any* response
+            // sequence. A continuation-token comparison would serve neither purpose: S3 mints a
+            // fresh token per response, so two identical requests yield two different tokens and
+            // the comparison never fires — which is how a listing that re-fetched page one forever
+            // once went undetected.
+            if pagesFetched >= MAX_LIST_PAGES {
+                return error ai:Error(string `Listing for bucket '${bucket}'` +
+                    (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
+                    string ` reached the ${MAX_LIST_PAGES}-page ceiling without completing, so ` +
+                    string `it cannot be fully read. Narrow the prefix if the listing is ` +
+                    string `genuinely this large.`);
             }
             continuationToken = nextToken;
         }
@@ -268,8 +315,10 @@ public isolated class TextDataLoader {
 isolated function includeInPrefixWalk(S3Item item, string prefix, boolean recursive,
         string[]? includeExtensions) returns boolean {
     string key = item.key;
-    // Skip S3 console "folder" placeholders: zero-byte keys whose name ends in '/'.
-    if key.endsWith("/") {
+    // Skip S3 console "folder" placeholders: zero-byte keys whose name ends in '/'. One carrying
+    // content is not a placeholder, so it falls through to be classified and skipped with a
+    // warning like any other unloadable object, rather than disappearing here without a trace.
+    if key.endsWith("/") && item.size == 0 {
         return false;
     }
     if !recursive {
