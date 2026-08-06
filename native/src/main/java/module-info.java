@@ -21,5 +21,4 @@ module io.ballerina.lib.ai.aws.s3 {
     requires org.apache.tika.core;
     requires org.apache.poi.poi;
     requires org.apache.poi.ooxml;
-    exports io.ballerina.lib.ai.aws.s3;
 }

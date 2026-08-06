@@ -202,6 +202,11 @@ public isolated class TextDataLoader {
         string? previousPageLastKey = ();
         // Pages fetched so far, bounded by MAX_LIST_PAGES whatever the server returns.
         int pagesFetched = 0;
+        // Continuation tokens already fed back. A well-behaved listing mints a fresh token per
+        // response, so a token seen twice means the server is looping — including the empty-page
+        // case the last-key check above cannot see. Bounded by the page ceiling, so it stays O(1)
+        // relative to pages, not keys.
+        map<boolean> seenContinuationTokens = {};
         while true {
             S3Page page = check listObjectPage(self.s3Client, bucket, prefix, delimiter,
                     continuationToken, MAX_KEYS_PER_PAGE);
@@ -238,6 +243,7 @@ public isolated class TextDataLoader {
                     (prefix is () ? "" : string ` under prefix '${prefix}'`) +
                     string ` is truncated but returned no continuation token, so it cannot be fully read.`);
             }
+            
             // The last-key check above catches a stuck listing as soon as it re-serves a page,
             // but it cannot see a run of object-less pages — and those are legitimate: a
             // non-recursive walk of a folder-heavy prefix returns pages holding nothing but
@@ -246,10 +252,11 @@ public isolated class TextDataLoader {
             // bucket organised as one prefix per tenant produces exactly that, so capping
             // consecutive empty pages would fail a perfectly good listing. The page ceiling bounds
             // that path instead, and is what makes this loop terminate for *any* response
-            // sequence. A continuation-token comparison would serve neither purpose: S3 mints a
-            // fresh token per response, so two identical requests yield two different tokens and
-            // the comparison never fires — which is how a listing that re-fetched page one forever
-            // once went undetected.
+            // sequence. The seen-token guard below adds an earlier exit for the narrower pathology
+            // of a server that *repeats* a continuation token (e.g. a truncated but empty page
+            // cycling the same token): a well-behaved S3 mints a fresh token per response, so the
+            // guard never fires on a legitimate listing, but a stuck one that re-serves the same
+            // token is caught at once rather than only at the ceiling.
             if pagesFetched >= MAX_LIST_PAGES {
                 return error ai:Error(string `Listing for bucket '${bucket}'` +
                     (prefix is () ? "" : string ` under prefix '${prefix}'`) +
@@ -257,6 +264,13 @@ public isolated class TextDataLoader {
                     string `it cannot be fully read. Narrow the prefix if the listing is ` +
                     string `genuinely this large.`);
             }
+            if seenContinuationTokens.hasKey(nextToken) {
+                return error ai:Error(string `Listing for bucket '${bucket}'` +
+                    (prefix is () ? "" : string ` under prefix '${prefix}'`) +
+                    string ` is not advancing: continuation token '${nextToken}' was returned twice, ` +
+                    string `so the listing cannot be fully read.`);
+            }
+            seenContinuationTokens[nextToken] = true;
             continuationToken = nextToken;
         }
         return documents;

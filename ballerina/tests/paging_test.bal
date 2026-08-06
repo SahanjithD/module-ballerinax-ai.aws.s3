@@ -231,12 +231,11 @@ function testTruncatedPageWithoutTokenFails() {
     }
 }
 
-// The case no key-based check can see: object-less pages that report more results forever. They
-// offer nothing to compare, and capping consecutive empty pages would fail a legitimate
-// folder-heavy walk — so the page ceiling is what bounds this, and it is what makes the loop
-// terminate for *any* response sequence. Removing the ceiling makes this test hang.
+// A stuck listing that *repeats* a continuation token on object-less pages cannot be caught by the
+// key-based check (an empty page offers no key to compare). The seen-token guard rejects it as soon
+// as a token is returned a second time — immediately, rather than only at the page ceiling.
 @test:Config {}
-function testEndlessObjectLessPagesHitTheCeiling() {
+function testRepeatedContinuationTokenIsRejected() {
     s3:Client mockClient = test:mock(s3:Client);
     test:prepare(mockClient).when("listObjects").thenReturn(pageOf([], true, "TOKEN"));
 
@@ -245,10 +244,48 @@ function testEndlessObjectLessPagesHitTheCeiling() {
         test:assertFail("The loader must construct: " + loader.message());
     }
     ai:Document[]|ai:Document|ai:Error result = loader.load();
-    test:assertTrue(result is ai:Error, "An endless run of object-less pages must be bounded");
+    test:assertTrue(result is ai:Error, "A repeated continuation token must fail loudly");
+    if result is ai:Error {
+        test:assertTrue(result.message().includes("returned twice"),
+                "Unexpected message: " + result.message());
+    }
+}
+
+// The case no key-based or token check can see: object-less pages that report more results forever,
+// each with a *fresh* token (so the seen-token guard never fires) — the legitimate folder-heavy
+// walk shape. The page ceiling is what bounds this, and it is what makes the loop terminate for
+// *any* response sequence. Removing the ceiling makes this test hang.
+@test:Config {}
+function testEndlessFreshTokenPagesHitTheCeiling() {
+    s3:Client mockClient = test:mock(s3:Client, new FreshTokenListClient());
+
+    TextDataLoader|ai:Error loader = loaderOver(mockClient, "wide/");
+    if loader is ai:Error {
+        test:assertFail("The loader must construct: " + loader.message());
+    }
+    ai:Document[]|ai:Document|ai:Error result = loader.load();
+    test:assertTrue(result is ai:Error, "An endless run of fresh-token pages must be bounded");
     if result is ai:Error {
         test:assertTrue(result.message().includes("page ceiling"),
                 "Unexpected message: " + result.message());
+    }
+}
+
+// Call counter for `FreshTokenListClient`, kept at module level because `test:mock` rejects a mock
+// object that carries fields of its own.
+isolated int freshTokenCalls = 0;
+
+// A mocked client whose `listObjects` returns an object-less, truncated page with a distinct
+// continuation token on every call — the legitimate endless-walk shape the page ceiling bounds.
+isolated client class FreshTokenListClient {
+    isolated remote function listObjects(string bucketName, *s3:ListObjectsConfig config)
+            returns s3:ListObjectsResponse|s3:Error {
+        int n;
+        lock {
+            freshTokenCalls += 1;
+            n = freshTokenCalls;
+        }
+        return pageOf([], true, string `TOKEN-${n}`);
     }
 }
 
