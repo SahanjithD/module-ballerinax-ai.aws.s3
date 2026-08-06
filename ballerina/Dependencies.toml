@@ -433,7 +433,7 @@ modules = [
 [[package]]
 org = "ballerinax"
 name = "aws.s3"
-version = "5.0.0"
+version = "4.0.0"
 dependencies = [
 	{org = "ballerina", name = "data.csv"},
 	{org = "ballerina", name = "data.jsondata"},
