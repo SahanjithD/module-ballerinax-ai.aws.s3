@@ -85,15 +85,6 @@ dependencies = [
 
 [[package]]
 org = "ballerina"
-name = "data.csv"
-version = "0.8.2"
-dependencies = [
-	{org = "ballerina", name = "jballerina.java"},
-	{org = "ballerina", name = "log"}
-]
-
-[[package]]
-org = "ballerina"
 name = "data.jsondata"
 version = "1.1.4"
 dependencies = [
@@ -424,6 +415,7 @@ dependencies = [
 	{org = "ballerina", name = "log"},
 	{org = "ballerina", name = "test"},
 	{org = "ballerina", name = "time"},
+	{org = "ballerinax", name = "aws"},
 	{org = "ballerinax", name = "aws.s3"}
 ]
 modules = [
@@ -432,13 +424,23 @@ modules = [
 
 [[package]]
 org = "ballerinax"
+name = "aws"
+version = "1.0.1"
+dependencies = [
+	{org = "ballerina", name = "jballerina.java"}
+]
+modules = [
+	{org = "ballerinax", packageName = "aws", moduleName = "aws"},
+	{org = "ballerinax", packageName = "aws", moduleName = "aws.auth"}
+]
+
+[[package]]
+org = "ballerinax"
 name = "aws.s3"
 version = "4.0.0"
 dependencies = [
-	{org = "ballerina", name = "data.csv"},
-	{org = "ballerina", name = "data.jsondata"},
-	{org = "ballerina", name = "io"},
-	{org = "ballerina", name = "jballerina.java"}
+	{org = "ballerina", name = "jballerina.java"},
+	{org = "ballerinax", name = "aws"}
 ]
 modules = [
 	{org = "ballerinax", packageName = "aws.s3", moduleName = "aws.s3"}
