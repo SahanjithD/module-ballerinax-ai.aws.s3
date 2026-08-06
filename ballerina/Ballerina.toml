@@ -79,12 +79,11 @@ version = "2.20.0"
 # Commons Compress, declared explicitly because OOXML parsing needs it: Tika's OOXMLParser
 # runs a zip-container detection pass that probes archive formats through this library.
 #
-# Pinned to 1.27.1 rather than the 1.28.0 used by `ballerina/ai`. From 1.28.0, commons-compress
-# calls `SystemProperties.getUserName(String)`, which only exists in commons-lang3 >= 3.17.0,
-# while the Ballerina runtime (ballerina-rt) bundles a shaded commons-lang3 3.14.0 that wins on
-# the classpath. With 1.28.0, .pptx extraction fails at runtime with a NoSuchMethodError;
-# declaring a newer commons-lang3 here does not help, because the runtime's copy takes
-# precedence. 1.27.1 does not use that overload and works against the bundled 3.14.0.
+# Pinned below the 1.28.0 used by `ballerina/ai`. From 1.28.0, commons-compress calls
+# `SystemProperties.getUserName(String)`, which only exists in commons-lang3 >= 3.17.0, while
+# the Ballerina runtime (ballerina-rt) bundles a shaded commons-lang3 3.14.0 that wins on the
+# classpath. With 1.28.0, .pptx extraction fails at runtime with a NoSuchMethodError; declaring
+# a newer commons-lang3 does not help, because the runtime's copy takes precedence.
 [[platform.java21.dependency]]
 groupId = "org.apache.commons"
 artifactId = "commons-compress"
@@ -111,5 +110,3 @@ version = "5.3.0"
 groupId = "com.zaxxer"
 artifactId = "SparseBitSet"
 version = "1.3"
-
-

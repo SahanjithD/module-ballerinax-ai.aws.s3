@@ -6,8 +6,8 @@ ready to be chunked, embedded, and indexed for retrieval-augmented generation (R
 
 It implements the `ai:DataLoader` abstraction, so it can be used anywhere an `ai:DataLoader` is
 expected and its output feeds directly into `ai:KnowledgeBase.ingest`. Natively-textual objects are
-decoded directly; PDF, Word (`.docx`) and PowerPoint (`.pptx`) documents have their text extracted
-**in memory** — object content is never written to disk.
+decoded directly; PDF, Word (`.docx`), PowerPoint (`.pptx`) and Excel (`.xlsx`) documents have their
+text extracted **in memory** — object content is never written to disk.
 
 ## Prerequisites
 
@@ -23,8 +23,10 @@ The loader authenticates in one of two ways:
 - **Static credentials** — an access key pair for an IAM user or role, optionally with a session
   token for temporary (STS) credentials. See
   [Managing access keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html).
-- **EC2/ECS IAM role** — no keys at all; credentials are resolved from the instance metadata
-  service. This works only when running on AWS infrastructure with an attached instance or task role.
+- **EC2/ECS IAM role** — no keys at all; credentials are resolved from the AWS infrastructure the
+  code runs on. An ECS task role is resolved through the ECS container credential endpoint, while an
+  EC2 instance profile is resolved through the EC2 Instance Metadata Service (IMDS). This works only
+  when running on AWS infrastructure with an attached instance or task role.
 
 ### 3. Grant the required IAM permissions
 
@@ -83,7 +85,8 @@ s3:TextDataLoader loader = check new (
     [
         {
             bucket: "my-corpus-bucket",
-            targets: [{path: "reports/", recursive: true}]
+            paths: ["reports/"],
+            recursive: true
         }
     ]
 );
@@ -118,10 +121,11 @@ or an already-configured `s3:Client` you want it to reuse.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `auth` | `StaticAuthConfig \| ProfileAuthConfig \| DEFAULT_CREDENTIALS` | — | How to authenticate (see below) |
+| `auth` | `auth:AuthConfig` — e.g. `auth:StaticAuthConfig \| auth:ProfileAuthConfig \| auth:DEFAULT_CREDENTIALS` (from `ballerinax/aws.auth`) | — | How to authenticate (see below) |
 | `region` | `Region` | `US_EAST_1` (`"us-east-1"`) | **Must match the region each bucket was created in** — a mismatch fails with an opaque `PermanentRedirect` error. The bucket's region is shown in the S3 console's Buckets list |
 
 ```ballerina
+import ballerinax/aws.auth as awsAuth;
 import ballerinax/aws.s3 as awsS3;
 
 // Static credentials (an access key pair)
@@ -138,7 +142,7 @@ awsS3:ConnectionConfig config = {
 
 // AWS default credential chain — environment variables, ECS container credentials,
 // and EC2/ECS instance-profile (IAM role) credentials, resolved automatically
-awsS3:ConnectionConfig config = {auth: awsS3:DEFAULT_CREDENTIALS, region: "us-east-1"};
+awsS3:ConnectionConfig config = {auth: awsAuth:DEFAULT_CREDENTIALS, region: "us-east-1"};
 
 // A named profile from the shared AWS credentials file
 awsS3:ConnectionConfig config = {auth: {profileName: "prod"}, region: "us-east-1"};
@@ -162,32 +166,38 @@ awsS3:Client s3Client = check new ({
 s3:TextDataLoader loader = check new (s3Client, [{bucket: "my-corpus-bucket"}]);
 ```
 
-### Sources and targets
+### Sources and paths
 
-A `Source` names a bucket and the `Target`s to read from it. Several sources may be configured in
+A `Source` names a bucket and the paths to read from it. Several sources may be configured in
 one loader; their documents are aggregated in the order given.
 
-| `Target` field | Type | Default | Description |
+| `Source` field | Type | Default | Description |
 |---|---|---|---|
-| `path` | `string` | `""` | An object key or key prefix. See "How paths are resolved" below |
-| `recursive` | `boolean` | `false` | Whether to descend into nested prefixes |
-| `includeExtensions` | `string[]?` | `()` (all types) | Case-insensitive extension allowlist; a leading dot is optional |
+| `bucket` | `string` | — | The bucket name; must live in the connection's region |
+| `paths` | `string[]?` | `()` (omit → whole bucket) | One or more object keys or key prefixes. Omit it to load the whole bucket. See "How paths are resolved" below |
+| `recursive` | `boolean` | `false` | Whether to descend into nested prefixes. Applies to every prefix in `paths` |
+| `includeExtensions` | `string[]?` | `()` (all types) | Case-insensitive extension allowlist; a leading dot is optional. Applies to every prefix in `paths` |
 
 ```ballerina
 {
     bucket: "my-corpus-bucket",
-    targets: [
-        {path: "reports/2026/", recursive: true, includeExtensions: [".pdf", "docx"]},
-        {path: "policies/handbook.md"}
-    ]
+    paths: ["reports/2026/", "policies/handbook.md"],
+    recursive: true,
+    includeExtensions: [".pdf", "docx"]
 }
 ```
+
+`recursive` and `includeExtensions` are set once per source and apply to all of its `paths`. If
+different prefixes in the same bucket need different recursion or extension filters, configure them
+as separate sources.
 
 ### How paths are resolved
 
 S3 has no folders — only keys that happen to contain `/`. So:
 
-- `""` (the default) or a value ending in `/` is treated as a **prefix**.
+- Omitting `paths` (or an empty-string element `""`) loads the **whole bucket** — the listing runs
+  with the S3 prefix left off.
+- A value ending in `/` is treated as a **prefix**.
 - Anything else is tried as an **exact key** first and, if no such key exists, treated as a prefix.
 - Keys ending in `/` (the zero-byte "folder" objects the S3 console creates) are always skipped.
 - With `recursive: false`, only keys directly under the prefix are loaded — a key whose remainder
@@ -198,8 +208,8 @@ found while **walking a prefix** is skipped with a logged warning, so one stray 
 an entire corpus load.
 
 > **Collision to be aware of:** if a bucket holds *both* an object at key `reports` and objects
-> under `reports/`, then `path: "reports"` resolves the single object and ignores the folder
-> entirely — the exact-key match wins and there is no error. Write `path: "reports/"` when you
+> under `reports/`, then the path `"reports"` resolves the single object and ignores the folder
+> entirely — the exact-key match wins and there is no error. Use `"reports/"` when you
 > mean the prefix.
 
 ### Loader options (`LoaderOptions`)
@@ -228,8 +238,8 @@ natively-textual formats S3 buckets commonly hold.
 | PDF | `pdf` | Apache Tika `PDFParser` + PDFBox, in memory |
 | Word | `docx` | Apache POI `XWPFWordExtractor`, in memory |
 | PowerPoint | `pptx` | Apache POI `SlideShowExtractor`, in memory |
-| **Legacy binary Office** | `doc`, `ppt` | **Not supported** — convert to `.docx` / `.pptx` or PDF |
-| **Spreadsheets** | `xls`, `xlsx` | **Not supported** — tabular extraction is out of scope; export to `.csv` |
+| Excel | `xlsx` | Apache POI `XSSFExcelExtractor`, in memory — tab-separated cells, one row per line, each sheet prefixed with its name |
+| **Legacy binary Office** | `doc`, `ppt`, `xls` | **Not supported** — convert to the OOXML `.docx` / `.pptx` / `.xlsx` or PDF |
 | Anything else | images, audio, unknown binary | Skipped (an error if named explicitly) |
 
 Object metadata is attached to every document: `fileName` (the key), `mimeType`, `fileSize`,
@@ -244,26 +254,45 @@ Please read these before indexing a large or busy bucket.
   document, because `ai:DataLoader.load()` returns a `Document[]` — there is no streaming or cursor
   in the interface. A very large prefix therefore produces a correspondingly large in-memory
   result. Narrow the `path`, or split the work across several loads, if that is a concern.
-- **A listing is not a consistent snapshot.** S3 listings are eventually consistent and returned
-  in key order, and the loader pages through them. Under concurrent writes, objects added or
-  removed mid-load can be missed or double-counted — inherent to paginated listing.
+- **A prefix walk is bounded at 10,000 listing pages.** That ceiling is a safety net, not a document
+  cap: it guarantees the walk terminates whatever the listing returns, and reaching it is an error
+  rather than a partial corpus. Ten thousand pages covers ten million listed entries — counting both
+  objects and, for a non-recursive walk, the sub-folders S3 rolls into CommonPrefixes — so no
+  listing this loader could return in memory comes close. A walk that hits it needs a narrower
+  `path`.
+- **Skipped objects are reported only to the log.** Archived, over-sized, undecodable and
+  unsupported objects are skipped with a warning so that one bad object cannot fail a whole corpus,
+  but `load()` returns a shorter array with no programmatic signal. A caller cannot distinguish
+  "nothing matched" from "several objects were skipped" without reading the logs.
+- **`load()` has no overall time limit.** The paging loop always terminates, but `ballerinax/aws.s3`
+  4.0.0 exposes no timeout, retry or HTTP configuration on `ConnectionConfig`, so a stalled
+  connection blocks the call indefinitely. Apply a deadline on the calling side if you need one.
+- **S3 Express One Zone (directory) buckets are not usable.** Every object in one reports the
+  `EXPRESS_ONEZONE` storage class, which is absent from the connector's `StorageClass` enum, so
+  listing and metadata calls fail to deserialize. The exact-key path is designed to work on them —
+  HEAD is order-independent, which unordered directory-bucket listings require — and needs no change
+  here once the connector is fixed.
+- **A listing is not a consistent snapshot.** S3 read and list operations are strongly consistent,
+  but a paginated load is not an atomic snapshot: the loader pages through a listing, and concurrent
+  writes across page requests can cause objects to be missed or double-counted — inherent to
+  paginated listing.
 - **Each object is read entirely into memory.** Extraction reads from an in-memory buffer so that
   no temporary file is ever written, but each object must therefore fit in the heap. `maxObjectSize`
-  (default 100 MiB) bounds this; a larger object is a clear error, not an out-of-memory crash.
-- **Non-recursive filtering happens client-side.** The loader lists without a `delimiter` and
-  filters nested keys itself, so `recursive: false` still *lists* every key under the prefix and
-  discards the nested ones. On a wide prefix this costs listing bandwidth — prefer a narrower `path`.
+  (default 100 MiB) bounds each individual object read; an object larger than that is a clear error
+  rather than an attempted load.
+- **Non-recursive filtering.** The loader lists with delimiter `/`, so S3 returns only same-level
+  keys (descendants roll into `CommonPrefixes`, which the connector drops); a client-side filter
+  stays as a backstop.
 - **No `versionId` selection.** The loader always reads the current version of each object. The
   underlying connector *can* fetch a specific version, but the loader does not expose it, so a
   corpus cannot be pinned to specific object versions.
 - **An exact key is resolved by listing its prefix**, not with a `HEAD`, to avoid a download just
   to test existence. Functionally transparent; noted for cost accounting on very large prefixes.
-- **Legacy binary Office and spreadsheets are unsupported.** `.doc`, `.ppt`, `.xls` and `.xlsx`
-  are recognised only so they can be rejected with a format-specific message or skipped. This
-  matches `ballerina/ai`. Convert `.doc`/`.ppt` to `.docx`/`.pptx` or PDF; export spreadsheets to
-  `.csv`, which is read as text. (Note `.xlsx` is unsupported despite being OOXML like the
-  supported `.docx`/`.pptx` — extracting meaningful text from a spreadsheet is a different
-  problem, not a format-support gap.)
+- **Legacy binary Office formats are unsupported.** `.doc`, `.ppt` and `.xls` are recognised only
+  so they can be rejected with a format-specific message or skipped. Convert them to their OOXML
+  successors (`.docx`/`.pptx`/`.xlsx`) or PDF. The OOXML `.xlsx` is extracted via POI's
+  `XSSFExcelExtractor`: cells are rendered tab-separated, one row per line, each sheet prefixed with
+  its name, and formula cells contribute their last cached result.
 - **One unreadable object fails the whole load.** If an object is deleted between being listed
   and being downloaded, or its content cannot be decoded or parsed, the entire `load()` returns an
   error rather than skipping it. This is deliberate — a silently incomplete RAG index is worse
