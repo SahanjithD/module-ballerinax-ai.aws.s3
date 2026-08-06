@@ -85,7 +85,8 @@ s3:TextDataLoader loader = check new (
     [
         {
             bucket: "my-corpus-bucket",
-            targets: [{path: "reports/", recursive: true}]
+            paths: ["reports/"],
+            recursive: true
         }
     ]
 );
@@ -164,26 +165,30 @@ awsS3:Client s3Client = check new ({
 s3:TextDataLoader loader = check new (s3Client, [{bucket: "my-corpus-bucket"}]);
 ```
 
-### Sources and targets
+### Sources and paths
 
-A `Source` names a bucket and the `Target`s to read from it. Several sources may be configured in
+A `Source` names a bucket and the paths to read from it. Several sources may be configured in
 one loader; their documents are aggregated in the order given.
 
-| `Target` field | Type | Default | Description |
+| `Source` field | Type | Default | Description |
 |---|---|---|---|
-| `path` | `string` | `""` | An object key or key prefix. See "How paths are resolved" below |
-| `recursive` | `boolean` | `false` | Whether to descend into nested prefixes |
-| `includeExtensions` | `string[]?` | `()` (all types) | Case-insensitive extension allowlist; a leading dot is optional |
+| `bucket` | `string` | — | The bucket name; must live in the connection's region |
+| `paths` | `string[]` | `[""]` | One or more object keys or key prefixes. See "How paths are resolved" below |
+| `recursive` | `boolean` | `false` | Whether to descend into nested prefixes. Applies to every prefix in `paths` |
+| `includeExtensions` | `string[]?` | `()` (all types) | Case-insensitive extension allowlist; a leading dot is optional. Applies to every prefix in `paths` |
 
 ```ballerina
 {
     bucket: "my-corpus-bucket",
-    targets: [
-        {path: "reports/2026/", recursive: true, includeExtensions: [".pdf", "docx"]},
-        {path: "policies/handbook.md"}
-    ]
+    paths: ["reports/2026/", "policies/handbook.md"],
+    recursive: true,
+    includeExtensions: [".pdf", "docx"]
 }
 ```
+
+`recursive` and `includeExtensions` are set once per source and apply to all of its `paths`. If
+different prefixes in the same bucket need different recursion or extension filters, configure them
+as separate sources.
 
 ### How paths are resolved
 
@@ -200,8 +205,8 @@ found while **walking a prefix** is skipped with a logged warning, so one stray 
 an entire corpus load.
 
 > **Collision to be aware of:** if a bucket holds *both* an object at key `reports` and objects
-> under `reports/`, then `path: "reports"` resolves the single object and ignores the folder
-> entirely — the exact-key match wins and there is no error. Write `path: "reports/"` when you
+> under `reports/`, then the path `"reports"` resolves the single object and ignores the folder
+> entirely — the exact-key match wins and there is no error. Use `"reports/"` when you
 > mean the prefix.
 
 ### Loader options (`LoaderOptions`)
@@ -257,7 +262,7 @@ Please read these before indexing a large or busy bucket.
   but `load()` returns a shorter array with no programmatic signal. A caller cannot distinguish
   "nothing matched" from "several objects were skipped" without reading the logs.
 - **`load()` has no overall time limit.** The paging loop always terminates, but `ballerinax/aws.s3`
-  5.0.0 exposes no timeout, retry or HTTP configuration on `ConnectionConfig`, so a stalled
+  4.0.0 exposes no timeout, retry or HTTP configuration on `ConnectionConfig`, so a stalled
   connection blocks the call indefinitely. Apply a deadline on the calling side if you need one.
 - **S3 Express One Zone (directory) buckets are not usable.** Every object in one reports the
   `EXPRESS_ONEZONE` storage class, which is absent from the connector's `StorageClass` enum, so

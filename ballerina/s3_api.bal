@@ -22,7 +22,7 @@ import ballerinax/aws.s3;
 
 // A normalized S3 listing entry — the subset of an object's metadata the loader uses. The
 // connector's `s3:S3Object` fields are carried through here rather than being handled
-// throughout the loader. In `aws.s3` 5.0.0 `size` is a required `int` and `eTag`/`lastModified`
+// throughout the loader. In `aws.s3` 4.0.0 `size` is a required `int` and `eTag`/`lastModified`
 // are required strings, so `size` is used directly; the string fields are still parsed
 // defensively when metadata is built (a blank/unparseable timestamp is omitted rather than
 // failing the load).
@@ -116,9 +116,12 @@ isolated function listObjectPage(s3:Client s3Client, string bucket, string? pref
 }
 
 // Opens a byte stream over an object's content. The caller drains and closes the stream.
+//
+// `aws.s3` 4.0.0 has no dedicated `getObjectAsStream`; streaming is done through `getObject` with
+// a `stream<byte[], error?>` target type, inferred here from the assignment.
 isolated function openObjectStream(s3:Client s3Client, string bucket, string key)
         returns stream<byte[], error?>|ai:Error {
-    stream<byte[], error?>|error objStream = s3Client->getObjectAsStream(bucket, key);
+    stream<byte[], error?>|error objStream = s3Client->getObject(bucket, key);
     if objStream is error {
         return error ai:Error(
             string `Failed to open object '${key}' in bucket '${bucket}': ${objStream.message()}`, objStream);

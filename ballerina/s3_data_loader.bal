@@ -55,7 +55,7 @@ public isolated class TextDataLoader {
     #
     # + s3Connection - Either an `s3:ConnectionConfig` describing how to reach S3 (the loader
     #                  builds the client from it), or an already-configured `s3:Client` to reuse
-    # + sources - One or more buckets, each with the targets (prefixes/keys) to load
+    # + sources - One or more buckets, each with the paths (prefixes/keys) to load
     # + options - Loader-wide options: the in-memory per-object size ceiling
     # + return - An `ai:Error` if the configuration is invalid or the client cannot be built
     public isolated function init(
@@ -80,8 +80,9 @@ public isolated class TextDataLoader {
     public isolated function load() returns ai:Document[]|ai:Document|ai:Error {
         ai:Document[] documents = [];
         foreach Source src in self.sources {
-            foreach Target target in src.targets {
-                ai:Document[] loaded = check self.loadTarget(src.bucket, target);
+            foreach string path in src.paths {
+                ai:Document[] loaded =
+                    check self.loadTarget(src.bucket, path, src.recursive, src.includeExtensions);
                 documents.push(...loaded);
             }
         }
@@ -94,11 +95,10 @@ public isolated class TextDataLoader {
     // Loads a single target, choosing prefix traversal or exact-key resolution. A value
     // ending in `/` (or empty) is a prefix; anything else is tried as an exact key first and
     // falls back to a prefix on a miss.
-    private isolated function loadTarget(string bucket, Target target)
-            returns ai:Document[]|ai:Error {
-        string path = target.path;
+    private isolated function loadTarget(string bucket, string path, boolean recursive,
+            string[]? includeExtensions) returns ai:Document[]|ai:Error {
         if path == "" || path.endsWith("/") {
-            return self.loadPrefix(bucket, path, target.recursive, target.includeExtensions);
+            return self.loadPrefix(bucket, path, recursive, includeExtensions);
         }
         S3Item? exact = check self.findExactKey(bucket, path);
         // A zero-byte object keyed exactly as the path may be a folder marker rather than a
@@ -117,7 +117,7 @@ public isolated class TextDataLoader {
         // "reports-archive/"), and so a non-recursive walk — which now passes delimiter="/" —
         // still sees the folder's same-level objects instead of rolling them into a CommonPrefix.
         ai:Document[] documents =
-            check self.loadPrefix(bucket, path + "/", target.recursive, target.includeExtensions);
+            check self.loadPrefix(bucket, path + "/", recursive, includeExtensions);
         if documents.length() == 0 && exact is S3Item {
             // The key was a marker candidate but names no folder either, so it was simply an empty
             // object of an unsupported type. Report that rather than returning nothing: the caller
@@ -231,7 +231,7 @@ public isolated class TextDataLoader {
             // but it cannot see a run of object-less pages — and those are legitimate: a
             // non-recursive walk of a folder-heavy prefix returns pages holding nothing but
             // CommonPrefixes, which the connector does not surface though they still consume the
-            // page's key budget. With the default `Target` (`path: ""`, `recursive: false`), a
+            // page's key budget. With the default source (`paths: [""]`, `recursive: false`), a
             // bucket organised as one prefix per tenant produces exactly that, so capping
             // consecutive empty pages would fail a perfectly good listing. The page ceiling bounds
             // that path instead, and is what makes this loop terminate for *any* response

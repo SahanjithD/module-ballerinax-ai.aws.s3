@@ -3,7 +3,7 @@
 Loads a document corpus out of S3, chunks and embeds it into a vector knowledge base, and
 answers a question over it — the end-to-end path the loader exists to serve.
 
-A `Source` names a bucket and the `Target`s to read from it; this example uses a single target
+A `Source` names a bucket and the paths to read from it; this example uses a single path
 with an extension allowlist.
 
 The point of interest is how little glue is needed: `load()` returns exactly the type
@@ -85,7 +85,7 @@ Top 2 matching passage(s):
 ## Notes
 
 - The configurable is called `prefix` because that is the common case, but the underlying
-  `Target` field is `path` and also accepts an **exact object key**.
+  `Source` field is `paths` and each entry also accepts an **exact object key**.
 - `includeExtensions` restricts the load to `.pdf`, `.md`, `.txt` and `.docx`, so unrelated
   objects under the prefix are not embedded. Anything unsupported found while walking the target
   is skipped with a warning rather than failing the run.

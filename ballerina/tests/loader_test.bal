@@ -17,6 +17,7 @@
 import ballerina/ai;
 import ballerina/io;
 import ballerina/test;
+import ballerinax/aws.auth;
 import ballerinax/aws.s3;
 
 // ---------------------------------------------------------------------------
@@ -77,10 +78,10 @@ isolated function testInitAcceptsAPrebuiltClient() returns error? {
 @test:Config {}
 isolated function testInitAcceptsDefaultCredentialsConfigShape() {
     // The default AWS credential chain (env vars, ECS/EC2 instance profiles, ...) is selected
-    // with `s3:DEFAULT_CREDENTIALS`. Where the chain cannot resolve credentials this must surface
-    // as a clean ai:Error, never a panic.
+    // with `auth:DEFAULT_CREDENTIALS` (from `ballerinax/aws.auth`). Where the chain cannot resolve
+    // credentials this must surface as a clean ai:Error, never a panic.
     TextDataLoader|ai:Error loader =
-        new ({auth: s3:DEFAULT_CREDENTIALS, region: "us-east-1"}, [{bucket: TEST_BUCKET}]);
+        new ({auth: auth:DEFAULT_CREDENTIALS, region: "us-east-1"}, [{bucket: TEST_BUCKET}]);
     if loader is ai:Error {
         test:assertTrue(loader.message().startsWith("Failed to initialize the AWS S3 client:"),
                 "A credential-chain failure must be wrapped, got: " + loader.message());
