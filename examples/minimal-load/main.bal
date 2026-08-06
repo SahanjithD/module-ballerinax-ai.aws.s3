@@ -32,7 +32,8 @@ public function main() returns error? {
         [
             {
                 bucket,
-                targets: [{path: prefix, recursive: true}]
+                paths: [prefix],
+                recursive: true
             }
         ]
     );

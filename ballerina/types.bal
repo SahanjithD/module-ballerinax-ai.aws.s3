@@ -14,42 +14,40 @@
 // specific language governing permissions and limitations
 // under the License.
 
-# A rule selecting what to load from a bucket. S3 has no real folders, so `path` is
-# interpreted against key prefixes (see the README's "How paths are resolved").
-public type Target record {|
-    # The object key or key prefix to load. A value ending in `/`, or the empty string
-    # (the whole bucket), is treated as a prefix; any other value is tried first as an
-    # exact key and, on a miss, as a prefix. Defaults to `""`, the whole bucket
-    string path = "";
-    # Whether a prefix is traversed into nested "sub-folders". When `false` (the
-    # default) only keys directly under the prefix are loaded — keys whose remainder
-    # after the prefix contains a further `/` are skipped
-    boolean recursive = false;
-    # Case-insensitive extension allowlist applied to keys found while walking a prefix
-    # (a leading dot is optional, e.g. `pdf` and `.PDF` both match `report.pdf`).
-    # An explicitly named exact key is always loaded regardless of this list.
-    #
-    # Filtering happens *after* listing, so this reduces how many documents are returned but
-    # not how many keys are listed: a prefix holding 5000 images and 40 PDFs still exceeds the
-    # one-page listing limit even when filtered to `["pdf"]`. Narrow `path` for that.
-    # An empty array behaves like `()` — everything is allowed.
-    # Defaults to `()`, meaning all supported types
-    string[]? includeExtensions = ();
-|};
-
-# A single S3 bucket together with the targets to load from it. Several sources may be
-# configured per loader; their documents are aggregated in the order given.
+# A single S3 bucket together with the paths to load from it. Several sources may be
+# configured per loader; their documents are aggregated in the order given. S3 has no real
+# folders, so a path is interpreted against key prefixes (see the README's "How paths are
+# resolved").
 public type Source record {|
+
     # The name of the S3 bucket. It must live in the region set on `s3:ConnectionConfig`, which
     # is shared by every source — a bucket in a different region fails with an opaque AWS
     # redirect error, so use one loader per region
     string bucket;
-    # One or more targets (prefixes/keys) to load from the bucket, read in the order given.
-    # Targets are not de-duplicated against each other: if two targets both match an object
-    # (say `reports/` and `reports/q1.pdf`), it is loaded once per matching target, which
-    # would index the same text twice. Keep targets disjoint.
-    # Defaults to a single target covering the whole bucket, non-recursively
-    Target[] targets = [{}];
+    
+    # One or more object keys or key prefixes to load, read in the order given. A value ending
+    # in `/`, or the empty string (the whole bucket), is treated as a prefix; any other value is
+    # tried first as an exact key and, on a miss, as a prefix. Paths are not de-duplicated: if
+    # two paths both match an object (say `reports/` and `reports/q1.pdf`), it is loaded once per
+    # matching path, which would index the same text twice. Keep paths disjoint.
+    # Defaults to a single path covering the whole bucket, non-recursively
+    string[] paths = [""];
+
+    # Whether a prefix is traversed into nested "sub-folders". Applies to every prefix in `paths`.
+    # When `false` (the default) only keys directly under a prefix are loaded — keys whose
+    # remainder after the prefix contains a further `/` are skipped
+    boolean recursive = false;
+
+    # Case-insensitive extension allowlist applied to keys found while walking a prefix, for every
+    # prefix in `paths` (a leading dot is optional, e.g. `pdf` and `.PDF` both match `report.pdf`).
+    # An explicitly named exact key is always loaded regardless of this list.
+    #
+    # Filtering happens *after* listing, so this reduces how many documents are returned but
+    # not how many keys are listed: a prefix holding 5000 images and 40 PDFs still exceeds the
+    # one-page listing limit even when filtered to `["pdf"]`. Narrow the path for that.
+    # An empty array behaves like `()` — everything is allowed.
+    # Defaults to `()`, meaning all supported types
+    string[]? includeExtensions = ();
 |};
 
 # Loader-wide options bounding what a single load reads.

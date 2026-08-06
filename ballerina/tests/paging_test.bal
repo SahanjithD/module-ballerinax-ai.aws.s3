@@ -50,7 +50,7 @@ isolated function pageOf(s3:S3Object[] objects, boolean truncated = false, strin
     return page;
 }
 
-// A byte stream over fixed content, standing in for `getObjectAsStream`.
+// A byte stream over fixed content, standing in for `getObject`'s stream return.
 isolated function contentStream(string text) returns stream<byte[], error?> {
     ChunkIterator iterator = new ([text.toBytes()]);
     return new (iterator);
@@ -86,9 +86,9 @@ isolated function manyObjects(string prefix, int count, int startAt = 0) returns
     return objects;
 }
 
-isolated function loaderOver(s3:Client s3Client, Target target, LoaderOptions options = {})
-        returns TextDataLoader|ai:Error =>
-    new (s3Client, [{bucket: PAGING_BUCKET, targets: [target]}], options);
+isolated function loaderOver(s3:Client s3Client, string path, boolean recursive = false,
+        LoaderOptions options = {}) returns TextDataLoader|ai:Error =>
+    new (s3Client, [{bucket: PAGING_BUCKET, paths: [path], recursive}], options);
 
 isolated function documentsOf(ai:Document[]|ai:Document loaded) returns ai:Document[] =>
     loaded is ai:Document[] ? loaded : [loaded];
@@ -116,9 +116,9 @@ function testPrefixAndTokenAreSentToListObjects() returns error? {
         .thenReturn(pageOf([obj("docs/a.txt")], true, "TOKEN-1"));
     test:prepare(mockClient).when("listObjects").withArguments(PAGING_BUCKET, secondRequest)
         .thenReturn(pageOf([obj("docs/b.txt")]));
-    test:prepare(mockClient).when("getObjectAsStream").thenReturn(contentStream("hello"));
+    test:prepare(mockClient).when("getObject").thenReturn(contentStream("hello"));
 
-    TextDataLoader loader = check loaderOver(mockClient, {path: "docs/", recursive: false});
+    TextDataLoader loader = check loaderOver(mockClient, "docs/");
     ai:Document[] documents = documentsOf(check loader.load());
     test:assertEquals(documents.length(), 2,
             "Both pages must be walked when the continuation token is sent correctly");
@@ -133,9 +133,9 @@ function testRecursiveWalkSendsNoDelimiter() returns error? {
 
     test:prepare(mockClient).when("listObjects").withArguments(PAGING_BUCKET, recursiveRequest)
         .thenReturn(pageOf([obj("docs/nested/deep.txt")]));
-    test:prepare(mockClient).when("getObjectAsStream").thenReturn(contentStream("deep"));
+    test:prepare(mockClient).when("getObject").thenReturn(contentStream("deep"));
 
-    TextDataLoader loader = check loaderOver(mockClient, {path: "docs/", recursive: true});
+    TextDataLoader loader = check loaderOver(mockClient, "docs/", true);
     ai:Document[] documents = documentsOf(check loader.load());
     test:assertEquals(documents.length(), 1, "A recursive walk must descend into sub-prefixes");
 }
@@ -154,9 +154,9 @@ function testPagingCrossesThePageBoundary() returns error? {
         pageOf(manyObjects("many/", 1000), true, "TOKEN-1"),
         pageOf(manyObjects("many/", 1, 1000))
     );
-    test:prepare(mockClient).when("getObjectAsStream").thenReturn(contentStream("x"));
+    test:prepare(mockClient).when("getObject").thenReturn(contentStream("x"));
 
-    TextDataLoader loader = check loaderOver(mockClient, {path: "many/", recursive: false});
+    TextDataLoader loader = check loaderOver(mockClient, "many/");
     ai:Document[] documents = documentsOf(check loader.load());
     test:assertEquals(documents.length(), 1001,
             "A >1000-key prefix must be paged through completely, not truncated at one page");
@@ -175,9 +175,9 @@ function testObjectLessTruncatedPagesDoNotStopTheWalk() returns error? {
         pageOf([], true, "TOKEN-3"),
         pageOf([obj("wide/finally.txt")])
     );
-    test:prepare(mockClient).when("getObjectAsStream").thenReturn(contentStream("found"));
+    test:prepare(mockClient).when("getObject").thenReturn(contentStream("found"));
 
-    TextDataLoader loader = check loaderOver(mockClient, {path: "wide/", recursive: false});
+    TextDataLoader loader = check loaderOver(mockClient, "wide/");
     ai:Document[] documents = documentsOf(check loader.load());
     test:assertEquals(documents.length(), 1,
             "Object-less but truncated pages must be paged through, not treated as the end");
@@ -196,9 +196,9 @@ function testRepeatedPageIsDetected() {
     s3:Client mockClient = test:mock(s3:Client);
     test:prepare(mockClient).when("listObjects")
         .thenReturn(pageOf([obj("a/one.txt")], true, "FRESH-TOKEN"));
-    test:prepare(mockClient).when("getObjectAsStream").thenReturn(contentStream("x"));
+    test:prepare(mockClient).when("getObject").thenReturn(contentStream("x"));
 
-    TextDataLoader|ai:Error loader = loaderOver(mockClient, {path: "a/", recursive: false});
+    TextDataLoader|ai:Error loader = loaderOver(mockClient, "a/");
     if loader is ai:Error {
         test:assertFail("The loader must construct: " + loader.message());
     }
@@ -217,9 +217,9 @@ function testRepeatedPageIsDetected() {
 function testTruncatedPageWithoutTokenFails() {
     s3:Client mockClient = test:mock(s3:Client);
     test:prepare(mockClient).when("listObjects").thenReturn(pageOf([obj("a/one.txt")], true));
-    test:prepare(mockClient).when("getObjectAsStream").thenReturn(contentStream("x"));
+    test:prepare(mockClient).when("getObject").thenReturn(contentStream("x"));
 
-    TextDataLoader|ai:Error loader = loaderOver(mockClient, {path: "a/", recursive: false});
+    TextDataLoader|ai:Error loader = loaderOver(mockClient, "a/");
     if loader is ai:Error {
         test:assertFail("The loader must construct: " + loader.message());
     }
@@ -240,7 +240,7 @@ function testEndlessObjectLessPagesHitTheCeiling() {
     s3:Client mockClient = test:mock(s3:Client);
     test:prepare(mockClient).when("listObjects").thenReturn(pageOf([], true, "TOKEN"));
 
-    TextDataLoader|ai:Error loader = loaderOver(mockClient, {path: "wide/", recursive: false});
+    TextDataLoader|ai:Error loader = loaderOver(mockClient, "wide/");
     if loader is ai:Error {
         test:assertFail("The loader must construct: " + loader.message());
     }
@@ -297,9 +297,9 @@ function testZeroByteMarkerFallsThroughToPrefixWalk() returns error? {
     });
     test:prepare(mockClient).when("listObjects").thenReturn(
         pageOf([obj("reports/q1.md"), obj("reports/q2.md")]));
-    test:prepare(mockClient).when("getObjectAsStream").thenReturn(contentStream("# report"));
+    test:prepare(mockClient).when("getObject").thenReturn(contentStream("# report"));
 
-    TextDataLoader loader = check loaderOver(mockClient, {path: "reports", recursive: false});
+    TextDataLoader loader = check loaderOver(mockClient, "reports");
     ai:Document[] documents = documentsOf(check loader.load());
     test:assertEquals(documents.length(), 2,
             "A zero-byte extensionless marker must not shadow the folder it names");
@@ -319,7 +319,7 @@ function testNamedUnsupportedKeyWithContentStillFails() {
         storageClass: s3:STANDARD
     });
 
-    TextDataLoader|ai:Error loader = loaderOver(mockClient, {path: "photo.png", recursive: false});
+    TextDataLoader|ai:Error loader = loaderOver(mockClient, "photo.png");
     if loader is ai:Error {
         test:assertFail("The loader must construct: " + loader.message());
     }
@@ -347,7 +347,7 @@ function testEmptyUnsupportedNamedKeyStillFails() {
     });
     test:prepare(mockClient).when("listObjects").thenReturn(pageOf([]));
 
-    TextDataLoader|ai:Error loader = loaderOver(mockClient, {path: "photo.png", recursive: false});
+    TextDataLoader|ai:Error loader = loaderOver(mockClient, "photo.png");
     if loader is ai:Error {
         test:assertFail("The loader must construct: " + loader.message());
     }

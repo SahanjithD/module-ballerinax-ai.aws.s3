@@ -37,7 +37,9 @@ public function main() returns error? {
         [
             {
                 bucket,
-                targets: [{path: prefix, recursive: true, includeExtensions: [".pdf", ".md", ".txt", ".docx"]}]
+                paths: [prefix],
+                recursive: true,
+                includeExtensions: [".pdf", ".md", ".txt", ".docx"]
             }
         ]
     );

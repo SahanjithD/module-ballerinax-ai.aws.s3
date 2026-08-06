@@ -4,8 +4,8 @@ Loads documents from an S3 bucket and prints what came back — the smallest use
 do with the loader, and the quickest way to confirm your credentials, IAM policy, and target are
 right before wiring up a full RAG pipeline.
 
-A `Source` names a bucket and the `Target`s to read from it; this example configures a single
-target covering one prefix.
+A `Source` names a bucket and the paths to read from it; this example configures a single
+path covering one prefix.
 
 For each document it prints the key, MIME type, size, ETag, and the first 200 characters of the
 extracted text, so you can see that PDF/DOCX/PPTX extraction actually worked.
@@ -68,8 +68,8 @@ preview   : # Field notes  These are the raw notes taken during the Q1 review...
 ## Notes
 
 - The configurable is called `prefix` because that is the common case, but the underlying
-  `Target` field is `path` and also accepts an **exact object key** — `path: "reports/q1.pdf"`
-  loads that one object.
+  `Source` field is `paths` and each entry also accepts an **exact object key** —
+  `paths: ["reports/q1.pdf"]` loads that one object.
 - `recursive: true` descends into nested prefixes. Set it to `false` to load only the keys
   directly under `prefix`.
 - The loader reads the **whole** matching corpus (paginating across listing pages), so a large
