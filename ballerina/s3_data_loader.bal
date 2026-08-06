@@ -80,10 +80,20 @@ public isolated class TextDataLoader {
     public isolated function load() returns ai:Document[]|ai:Document|ai:Error {
         ai:Document[] documents = [];
         foreach Source src in self.sources {
-            foreach string path in src.paths {
+            string[]? paths = src?.paths;
+            if paths is () {
+                // No paths configured for this bucket: load the whole bucket (non-recursively
+                // unless `recursive` is set). Expressed as an omitted S3 prefix (`()`), so no
+                // empty-string sentinel is involved.
                 ai:Document[] loaded =
-                    check self.loadTarget(src.bucket, path, src.recursive, src.includeExtensions);
+                    check self.loadPrefix(src.bucket, (), src.recursive, src.includeExtensions);
                 documents.push(...loaded);
+            } else {
+                foreach string path in paths {
+                    ai:Document[] loaded =
+                        check self.loadTarget(src.bucket, path, src.recursive, src.includeExtensions);
+                    documents.push(...loaded);
+                }
             }
         }
         if documents.length() == 1 {
@@ -98,7 +108,9 @@ public isolated class TextDataLoader {
     private isolated function loadTarget(string bucket, string path, boolean recursive,
             string[]? includeExtensions) returns ai:Document[]|ai:Error {
         if path == "" || path.endsWith("/") {
-            return self.loadPrefix(bucket, path, recursive, includeExtensions);
+            // An empty-string element means the whole bucket: pass `()` (omitted prefix) rather
+            // than "" so the prefix sentinel does not travel any further into the walk.
+            return self.loadPrefix(bucket, path == "" ? () : path, recursive, includeExtensions);
         }
         S3Item? exact = check self.findExactKey(bucket, path);
         // A zero-byte object keyed exactly as the path may be a folder marker rather than a
@@ -176,10 +188,9 @@ public isolated class TextDataLoader {
     // returns only same-level objects (descendant keys roll into CommonPrefixes, which the
     // connector drops and the loader does not need); the client-side filter in `includeInPrefixWalk`
     // stays as a belt-and-braces check.
-    private isolated function loadPrefix(string bucket, string prefix, boolean recursive,
+    private isolated function loadPrefix(string bucket, string? prefix, boolean recursive,
             string[]? includeExtensions) returns ai:Document[]|ai:Error {
         ai:Document[] documents = [];
-        string? effectivePrefix = prefix == "" ? () : prefix;
         string? delimiter = recursive ? () : "/";
         string? continuationToken = ();
         // The final key of the previous object-bearing page. ListObjectsV2 never returns a key
@@ -192,7 +203,7 @@ public isolated class TextDataLoader {
         // Pages fetched so far, bounded by MAX_LIST_PAGES whatever the server returns.
         int pagesFetched = 0;
         while true {
-            S3Page page = check listObjectPage(self.s3Client, bucket, effectivePrefix, delimiter,
+            S3Page page = check listObjectPage(self.s3Client, bucket, prefix, delimiter,
                     continuationToken, MAX_KEYS_PER_PAGE);
             pagesFetched += 1;
             int pageSize = page.items.length();
@@ -200,14 +211,14 @@ public isolated class TextDataLoader {
                 string lastKey = page.items[pageSize - 1].key;
                 if lastKey == previousPageLastKey {
                     return error ai:Error(string `Listing for bucket '${bucket}'` +
-                        (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
+                        (prefix is () ? "" : string ` under prefix '${prefix}'`) +
                         string ` is not advancing: two consecutive pages ended at the same key ` +
                         string `('${lastKey}'), so the listing cannot be fully read.`);
                 }
                 previousPageLastKey = lastKey;
             }
             foreach S3Item item in page.items {
-                if !includeInPrefixWalk(item, prefix, recursive, includeExtensions) {
+                if !includeInPrefixWalk(item, prefix ?: "", recursive, includeExtensions) {
                     continue;
                 }
                 ai:TextDocument? document = check self.loadObjectSkippingUnsupported(bucket, item);
@@ -224,14 +235,14 @@ public isolated class TextDataLoader {
                 // cannot be continued. Surface an error rather than silently returning a partial
                 // corpus. Not expected in practice.
                 return error ai:Error(string `Listing for bucket '${bucket}'` +
-                    (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
+                    (prefix is () ? "" : string ` under prefix '${prefix}'`) +
                     string ` is truncated but returned no continuation token, so it cannot be fully read.`);
             }
             // The last-key check above catches a stuck listing as soon as it re-serves a page,
             // but it cannot see a run of object-less pages — and those are legitimate: a
             // non-recursive walk of a folder-heavy prefix returns pages holding nothing but
             // CommonPrefixes, which the connector does not surface though they still consume the
-            // page's key budget. With the default source (`paths: [""]`, `recursive: false`), a
+            // page's key budget. With a whole-bucket source (no `paths`, `recursive: false`), a
             // bucket organised as one prefix per tenant produces exactly that, so capping
             // consecutive empty pages would fail a perfectly good listing. The page ceiling bounds
             // that path instead, and is what makes this loop terminate for *any* response
@@ -241,7 +252,7 @@ public isolated class TextDataLoader {
             // once went undetected.
             if pagesFetched >= MAX_LIST_PAGES {
                 return error ai:Error(string `Listing for bucket '${bucket}'` +
-                    (prefix == "" ? "" : string ` under prefix '${prefix}'`) +
+                    (prefix is () ? "" : string ` under prefix '${prefix}'`) +
                     string ` reached the ${MAX_LIST_PAGES}-page ceiling without completing, so ` +
                     string `it cannot be fully read. Narrow the prefix if the listing is ` +
                     string `genuinely this large.`);

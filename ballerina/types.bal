@@ -26,12 +26,14 @@ public type Source record {|
     string bucket;
     
     # One or more object keys or key prefixes to load, read in the order given. A value ending
-    # in `/`, or the empty string (the whole bucket), is treated as a prefix; any other value is
-    # tried first as an exact key and, on a miss, as a prefix. Paths are not de-duplicated: if
-    # two paths both match an object (say `reports/` and `reports/q1.pdf`), it is loaded once per
-    # matching path, which would index the same text twice. Keep paths disjoint.
-    # Defaults to a single path covering the whole bucket, non-recursively
-    string[] paths = [""];
+    # in `/` is treated as a prefix; any other value is tried first as an exact key and, on a
+    # miss, as a prefix. Paths are not de-duplicated: if two paths both match an object (say
+    # `reports/` and `reports/q1.pdf`), it is loaded once per matching path, which would index
+    # the same text twice. Keep paths disjoint.
+    # Optional: omit it to load the whole bucket (non-recursively unless `recursive` is set),
+    # which lists with the S3 prefix left off. An empty-string element is also accepted and means
+    # the same whole-bucket listing.
+    string[] paths?;
 
     # Whether a prefix is traversed into nested "sub-folders". Applies to every prefix in `paths`.
     # When `false` (the default) only keys directly under a prefix are loaded — keys whose

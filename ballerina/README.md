@@ -121,10 +121,11 @@ or an already-configured `s3:Client` you want it to reuse.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `auth` | `StaticAuthConfig \| ProfileAuthConfig \| DEFAULT_CREDENTIALS` | — | How to authenticate (see below) |
+| `auth` | `auth:AuthConfig` — e.g. `auth:StaticAuthConfig \| auth:ProfileAuthConfig \| auth:DEFAULT_CREDENTIALS` (from `ballerinax/aws.auth`) | — | How to authenticate (see below) |
 | `region` | `Region` | `US_EAST_1` (`"us-east-1"`) | **Must match the region each bucket was created in** — a mismatch fails with an opaque `PermanentRedirect` error. The bucket's region is shown in the S3 console's Buckets list |
 
 ```ballerina
+import ballerinax/aws.auth as awsAuth;
 import ballerinax/aws.s3 as awsS3;
 
 // Static credentials (an access key pair)
@@ -141,7 +142,7 @@ awsS3:ConnectionConfig config = {
 
 // AWS default credential chain — environment variables, ECS container credentials,
 // and EC2/ECS instance-profile (IAM role) credentials, resolved automatically
-awsS3:ConnectionConfig config = {auth: awsS3:DEFAULT_CREDENTIALS, region: "us-east-1"};
+awsS3:ConnectionConfig config = {auth: awsAuth:DEFAULT_CREDENTIALS, region: "us-east-1"};
 
 // A named profile from the shared AWS credentials file
 awsS3:ConnectionConfig config = {auth: {profileName: "prod"}, region: "us-east-1"};
@@ -173,7 +174,7 @@ one loader; their documents are aggregated in the order given.
 | `Source` field | Type | Default | Description |
 |---|---|---|---|
 | `bucket` | `string` | — | The bucket name; must live in the connection's region |
-| `paths` | `string[]` | `[""]` | One or more object keys or key prefixes. See "How paths are resolved" below |
+| `paths` | `string[]?` | `()` (omit → whole bucket) | One or more object keys or key prefixes. Omit it to load the whole bucket. See "How paths are resolved" below |
 | `recursive` | `boolean` | `false` | Whether to descend into nested prefixes. Applies to every prefix in `paths` |
 | `includeExtensions` | `string[]?` | `()` (all types) | Case-insensitive extension allowlist; a leading dot is optional. Applies to every prefix in `paths` |
 
@@ -194,7 +195,9 @@ as separate sources.
 
 S3 has no folders — only keys that happen to contain `/`. So:
 
-- `""` (the default) or a value ending in `/` is treated as a **prefix**.
+- Omitting `paths` (or an empty-string element `""`) loads the **whole bucket** — the listing runs
+  with the S3 prefix left off.
+- A value ending in `/` is treated as a **prefix**.
 - Anything else is tried as an **exact key** first and, if no such key exists, treated as a prefix.
 - Keys ending in `/` (the zero-byte "folder" objects the S3 console creates) are always skipped.
 - With `recursive: false`, only keys directly under the prefix are loaded — a key whose remainder
