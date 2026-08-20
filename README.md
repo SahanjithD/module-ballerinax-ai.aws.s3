@@ -5,16 +5,18 @@
 [![GitHub Last Commit](https://img.shields.io/github/last-commit/ballerina-platform/module-ballerinax-ai.aws.s3.svg?label=Last%20Commit)](https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3/commits/main)
 [![GitHub Issues](https://img.shields.io/github/issues/ballerina-platform/ballerina-library/module/ai.aws.s3.svg?label=Open%20Issues)](https://github.com/ballerina-platform/ballerina-library/labels/module%2Fai.aws.s3)
 
-The `ballerinax/ai.aws.s3` package provides a `TextDataLoader` that reads objects from
-[AWS S3](https://aws.amazon.com/s3/) buckets and returns them as `ai:TextDocument` values, ready to
-be chunked, embedded, and indexed by the [Ballerina AI](https://central.ballerina.io/ballerina/ai)
-module.
+The `ballerinax/ai.aws.s3` package provides two building blocks for RAG pipelines on AWS,
+implementing the corresponding [Ballerina AI](https://central.ballerina.io/ballerina/ai)
+abstractions so both can be used anywhere those are expected:
 
-It implements the `ai:DataLoader` abstraction, so it can be used anywhere an `ai:DataLoader` is
-expected — for example, in a retrieval-augmented generation (RAG) ingestion pipeline.
-Natively-textual objects are decoded directly, while PDF, Word (`.docx`), PowerPoint (`.pptx`) and
-Excel (`.xlsx`) documents have their text extracted **in memory** with Apache Tika and Apache POI —
-object content is never written to disk.
+- **`TextDataLoader`** (`ai:DataLoader`) reads objects from [AWS S3](https://aws.amazon.com/s3/)
+  buckets and returns them as `ai:TextDocument` values. Natively-textual objects are decoded
+  directly, while PDF, Word (`.docx`), PowerPoint (`.pptx`) and Excel (`.xlsx`) documents have
+  their text extracted **in memory** with Apache Tika and Apache POI — object content is never
+  written to disk.
+- **`VectorStore`** (`ai:VectorStore`) stores and queries vector embeddings in an
+  [Amazon S3 Vectors](https://aws.amazon.com/s3/features/vectors/) index — AWS's own vector
+  storage and similarity-search service.
 
 For the full API, configuration reference, supported file types, and usage guide, see the
 [package documentation](ballerina/README.md).
@@ -46,6 +48,18 @@ Please read these before indexing a large or busy bucket.
 - **All buckets in one loader share one region**, since `region` is set on the connection.
 - **One unreadable object fails the whole load** — deliberately, since a silently incomplete RAG
   index is worse than a failed one. Objects of unsupported *types* are skipped, not failed.
+
+`VectorStore` has its own set of limitations, described in full in the
+[package documentation](ballerina/README.md#limitations-1):
+
+- **Dense, text-only vectors.** No sparse/hybrid embeddings; `chunk.content` must be a `string`.
+- **The content metadata key must be declared non-filterable when the index is created** —
+  immutable afterwards, and easy to get wrong without reading the docs first.
+- **A query with no embedding scans the whole index** via `ListVectors`, since `QueryVectors`
+  cannot filter without a query vector. This is what makes `deleteByFilter` work at all, but it's
+  O(index size).
+- **No S3 Vectors emulator exists**, so its test suite runs against an in-process mock HTTP
+  service rather than a live endpoint or LocalStack.
 
 ## Issues and projects
 
