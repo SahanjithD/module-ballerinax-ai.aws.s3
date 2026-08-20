@@ -1,13 +1,20 @@
 ## Overview
 
-This package provides an [AWS S3](https://aws.amazon.com/s3/) data loader for Ballerina AI
-applications. It reads objects from S3 buckets and returns them as `ai:TextDocument` values,
-ready to be chunked, embedded, and indexed for retrieval-augmented generation (RAG).
+This package provides two building blocks for RAG pipelines on AWS: a data loader for
+[AWS S3](https://aws.amazon.com/s3/) and a vector store for
+[Amazon S3 Vectors](https://aws.amazon.com/s3/features/vectors/) — AWS's own vector storage and
+similarity-search service. Together they let a whole pipeline (load, chunk, embed, store, query)
+come from this one import.
 
-It implements the `ai:DataLoader` abstraction, so it can be used anywhere an `ai:DataLoader` is
-expected and its output feeds directly into `ai:KnowledgeBase.ingest`. Natively-textual objects are
-decoded directly; PDF, Word (`.docx`), PowerPoint (`.pptx`) and Excel (`.xlsx`) documents have their
-text extracted **in memory** — object content is never written to disk.
+`s3:TextDataLoader` reads objects from S3 buckets and returns them as `ai:TextDocument` values,
+ready to be chunked, embedded, and indexed. It implements the `ai:DataLoader` abstraction, so it
+can be used anywhere an `ai:DataLoader` is expected and its output feeds directly into
+`ai:KnowledgeBase.ingest`. Natively-textual objects are decoded directly; PDF, Word (`.docx`),
+PowerPoint (`.pptx`) and Excel (`.xlsx`) documents have their text extracted **in memory** —
+object content is never written to disk.
+
+`s3:VectorStore` implements `ai:VectorStore`, storing and querying vector embeddings in an
+Amazon S3 Vectors index. See [Vector store](#vector-store) below.
 
 ## Prerequisites
 
@@ -305,6 +312,201 @@ Please read these before indexing a large or busy bucket.
 - **All buckets in one loader share one region**, since the region is set on the connection. A
   bucket in a different region fails with an opaque AWS redirect error; use one loader per region.
 
+## Vector store
+
+`s3:VectorStore` implements `ai:VectorStore`, backed by
+[Amazon S3 Vectors](https://aws.amazon.com/s3/features/vectors/) — AWS's own vector storage and
+similarity-search service, in the same `s3vectors` namespace family as S3 itself but a distinct
+service with its own endpoint and IAM actions. It exists alongside the data loader so a full RAG
+pipeline can come from this one import: load documents from S3, chunk and embed them, and store
+the vectors back in S3 Vectors.
+
+There is no Ballerina connector for `s3vectors` (`ballerinax/aws.s3` is object storage only), so
+`VectorStore` talks to the service directly over `ballerina/http`, signing every request with AWS
+Signature Version 4 via `ballerinax/aws.auth`.
+
+### Before you start: create a vector index
+
+Unlike the loader, the vector store does not create its target for you — a vector bucket and
+index must already exist, and **two of the index's settings are immutable once created**:
+
+- **Dimension** and **distance metric** (`cosine` or `euclidean`) are fixed for the life of the
+  index and must match your embedding model's output.
+- **The chunk's text content must be stored as a non-filterable metadata key.** S3 Vectors caps
+  *filterable* metadata at 2 KB per vector — far below what chunk text routinely needs — while
+  *non-filterable* metadata has a much larger 40 KB budget. `VectorStore` stores chunk text under
+  the metadata key named by `Configuration.contentKey` (`"content"` by default), and **that key
+  must be declared in the index's `nonFilterableMetadataKeys` at creation time**. Getting this
+  wrong means deleting and recreating the index — it cannot be changed afterwards.
+
+Create the vector bucket and index with the AWS CLI:
+
+```bash
+aws s3vectors create-vector-bucket --vector-bucket-name my-vector-bucket
+
+aws s3vectors create-index \
+    --vector-bucket-name my-vector-bucket \
+    --index-name my-index \
+    --data-type float32 \
+    --dimension 1024 \
+    --distance-metric cosine \
+    --metadata-configuration '{"nonFilterableMetadataKeys": ["content"]}'
+```
+
+By default, `VectorStore.init` calls `GetIndex` once at startup and fails with an actionable
+message if the content key was left filterable — see `Configuration.validateIndexOnInit` below.
+
+### Grant the required IAM permissions
+
+| Action | Needed for |
+|---|---|
+| `s3vectors:PutVectors` | `add` |
+| `s3vectors:QueryVectors` | `query` with an embedding |
+| `s3vectors:GetVectors` | **Also required** whenever a query requests metadata or applies a filter — which this store always does, since the chunk lives in metadata. Its absence is the most common cause of a 403 here |
+| `s3vectors:DeleteVectors` | `delete` |
+| `s3vectors:ListVectors` | `query` with no embedding (the filter-only / `deleteByFilter` path) |
+| `s3vectors:GetIndex` | `init`, when `validateIndexOnInit` is `true` (the default) |
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3VectorsAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3vectors:PutVectors",
+        "s3vectors:QueryVectors",
+        "s3vectors:GetVectors",
+        "s3vectors:DeleteVectors",
+        "s3vectors:ListVectors",
+        "s3vectors:GetIndex"
+      ],
+      "Resource": "arn:aws:s3vectors:us-east-1:123456789012:bucket/my-vector-bucket/index/my-index"
+    }
+  ]
+}
+```
+
+### Quickstart
+
+#### Step 1: Import the module
+
+```ballerina
+import ballerinax/ai.aws.s3;
+```
+
+#### Step 2: Create the store
+
+```ballerina
+s3:VectorStore vectorStore = check new (
+    {
+        auth: {
+            accessKeyId: "<ACCESS_KEY_ID>",
+            secretAccessKey: "<SECRET_ACCESS_KEY>"
+        },
+        region: "us-east-1"
+    },
+    {vectorBucketName: "my-vector-bucket", indexName: "my-index"}
+);
+```
+
+#### Step 3: Use it as an `ai:VectorStore`
+
+```ballerina
+import ballerina/ai;
+
+check vectorStore.add([
+    {embedding: [0.12, 0.98, /* ... */], chunk: {'type: "text-chunk", content: "..."}}
+]);
+
+ai:VectorMatch[] matches = check vectorStore.query({embedding: queryEmbedding, topK: 5});
+
+check vectorStore.delete(["vector-id-1"]);
+```
+
+Or hand it to `ai:VectorKnowledgeBase` and let `ballerina/ai` drive chunking, embedding, and
+retrieval:
+
+```ballerina
+ai:VectorKnowledgeBase knowledgeBase = new (vectorStore, embeddingModel);
+check knowledgeBase.ingest(documents);
+```
+
+### Configuration
+
+#### Connection (`VectorStoreConnectionConfig`)
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `auth` | `auth:AuthConfig` | `auth:DEFAULT_CREDENTIALS` | Same credential shapes as the loader's `ConnectionConfig` — see Prerequisites above |
+| `region` | `aws:Region \| string` | `US_EAST_1` | Must match the region the vector bucket was created in. **S3 Vectors is not available in every AWS region** — check current availability before choosing one |
+| `serviceUrl` | `string?` | resolved from `region` | Overrides the resolved endpoint (scheme included). For testing against a local or proxied endpoint only |
+| `fips` | `boolean` | `false` | Target the FIPS 140-validated endpoint variant |
+
+#### Index (`IndexIdentifier`)
+
+Identify the target index one of two ways — not both:
+
+| Field | Type | Description |
+|---|---|---|
+| `vectorBucketName` + `indexName` | `string?` | The bucket and index name, together |
+| `indexArn` | `string?` | The index ARN, on its own |
+
+#### Store behaviour (`Configuration`)
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `contentKey` | `string` | `"content"` | The metadata key chunk text is stored under. Must be declared non-filterable on the index — see above |
+| `filters` | `ai:MetadataFilters?` | `()` | Applied to every query, combined with any per-query filters under `AND` |
+| `returnVectorData` | `boolean` | `false` | Whether `query` issues a follow-up `GetVectors` call to populate `ai:VectorMatch.embedding`. `QueryVectors` never returns vector data on its own; enabling this roughly doubles request volume and cost |
+| `maxListScan` | `int` | `100000` | Cap on how many vectors a filter-only query (no embedding — the shape `deleteByFilter` issues) will scan via `ListVectors` before failing, since S3 Vectors cannot filter server-side without a query vector |
+| `validateIndexOnInit` | `boolean` | `true` | Whether `init` reads the index configuration back with `GetIndex` and validates the content key up front |
+
+### Limitations
+
+- **Dense vectors only.** S3 Vectors has no sparse or hybrid index type. `add` and `query` reject
+  anything other than a plain `ai:Vector` (`float[]`) embedding.
+- **Text chunks only.** A vector's content is stored as metadata, which must be JSON — so
+  `chunk.content` must be a `string`. Image, audio, file and binary chunks are rejected.
+- **A query with no embedding scans the index.** `QueryVectors` requires a query vector and
+  cannot filter without one, so a query carrying only metadata filters — or neither, the shape
+  `ai:VectorKnowledgeBase.deleteByFilter` issues — pages through every vector with `ListVectors`
+  and evaluates filters in Ballerina, bounded by `Configuration.maxListScan`. This is the only way
+  `deleteByFilter` can work against this store at all, but it is an O(index size) operation on a
+  large index.
+- **`EQUAL` against array-valued metadata can disagree between the two filter paths.** Server-side,
+  S3 Vectors' `$eq` matches an array-valued metadata field if *any* element equals the filter
+  value. The local filter evaluator used by the no-embedding path above (and so `deleteByFilter`)
+  instead does a plain `==` against the whole stored value. A filter on a custom `ai:Metadata`
+  field that holds a JSON array can therefore match different vectors depending on whether the
+  query carried an embedding or not.
+- **`similarityScore` is a converted value, not the raw S3 Vectors distance.** S3 Vectors returns
+  a distance (lower is more similar); `ai:VectorMatch.similarityScore` must be higher-is-better.
+  For `cosine`, `1.0 - distance` recovers the true cosine similarity. For `euclidean`,
+  `1.0 / (1.0 + distance)` preserves rank order but is **not** numerically the same convention
+  `ai:InMemoryVectorStore` uses for that metric (it returns the raw Euclidean distance, which
+  inverts the ordering) — rank-order correctness was chosen over bit-for-bit consistency with
+  that inversion.
+- **Timestamps are stored as epoch-seconds numbers, not ISO-8601 strings.** `ai:Metadata`'s
+  `createdAt`/`modifiedAt` are `time:Utc` values; S3 Vectors' `$gt`/`$gte`/`$lt`/`$lte` range
+  operators only accept numbers, so encoding them as date strings (as the Pinecone vector store
+  does) would leave range filters on dates silently non-functional. A filter written against
+  either key must use an epoch-seconds number to match what was stored.
+- **`embedding` is empty unless `returnVectorData` is enabled.** `QueryVectors` never returns
+  vector data; see Configuration above.
+- **`delete` is idempotent.** Deleting a key that does not exist in the index is not an error,
+  unlike `ai:InMemoryVectorStore`, which raises one for a missing id.
+- **No index management.** Creating, deleting or listing vector buckets and indexes is out of
+  scope for this store — see "Before you start" above for creating one with the AWS CLI.
+- **Metadata limits are AWS's, enforced client-side where practical.** Up to 40 KB total metadata
+  per vector, 2 KB filterable, 50 keys, key names up to 63 characters, vector keys up to 1,024
+  characters. `add` validates these before sending and names the offending vector's key in the
+  error, rather than surfacing an opaque `ValidationException`.
+- **No S3 Vectors emulator exists**, so this store's transport layer is tested against an
+  in-process mock HTTP service rather than a live endpoint or LocalStack. Verify against a real
+  vector bucket before relying on it in production.
+
 ## Examples
 
 The `ai.aws.s3` connector provides practical examples illustrating usage in various scenarios.
@@ -313,3 +515,6 @@ The `ai.aws.s3` connector provides practical examples illustrating usage in vari
    — load documents from a bucket and inspect what came back.
 2. [RAG pipeline](https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3/tree/main/examples/rag-pipeline)
    — load a corpus, ingest it into a knowledge base, and answer questions over it.
+3. [Vector store RAG](https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3/tree/main/examples/vector-store-rag)
+   — load a corpus with `s3:TextDataLoader` and store its embeddings in `s3:VectorStore`,
+   loader and store from a single import.
