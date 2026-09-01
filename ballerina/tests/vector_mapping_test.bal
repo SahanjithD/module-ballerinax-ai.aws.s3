@@ -42,10 +42,24 @@ isolated function testAwsResolveEndpointHostUsesApiAwsSuffix() {
 }
 
 @test:Config {}
-isolated function testAwsResolveEndpointHostFipsVariant() {
-    string host = aws:resolveEndpointHost("s3vectors", aws:US_EAST_1, {dualstack: true, fips: true});
-    test:assertEquals(host, "s3vectors-fips.us-east-1.api.aws",
-            "The FIPS variant must prefix the service name with '-fips'");
+isolated function testResolveServiceEndpointRejectsFips() {
+    [string, string]|ai:Error result = resolveServiceEndpoint({region: aws:US_EAST_1, fips: true});
+    test:assertTrue(result is ai:Error,
+            "AWS deploys no FIPS endpoint for S3 Vectors, so 'fips' must be rejected rather than " +
+            "resolved to a host that does not exist");
+    if result is ai:Error {
+        test:assertTrue(result.message().includes("no FIPS endpoint"),
+                "The error must say why FIPS is unavailable, not just that the value is invalid");
+    }
+}
+
+@test:Config {}
+isolated function testResolveServiceEndpointRejectsFipsEvenWithServiceUrl() {
+    [string, string]|ai:Error result =
+        resolveServiceEndpoint({region: aws:US_EAST_1, fips: true, serviceUrl: "https://proxy.example"});
+    test:assertTrue(result is ai:Error,
+            "'fips' must not be silently ignored alongside a serviceUrl — that would leave the " +
+            "caller believing they are on a validated path");
 }
 
 @test:Config {}
