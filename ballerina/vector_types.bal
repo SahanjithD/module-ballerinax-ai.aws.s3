@@ -36,8 +36,10 @@ public type VectorStoreConnectionConfig record {|
     # which case the endpoint is derived from `region`
     string serviceUrl?;
 
-    # Whether to target the FIPS 140-validated endpoint variant
-    # (`s3vectors-fips.{region}.api.aws`). Ignored when `serviceUrl` is set
+    # Whether to target a FIPS 140-validated endpoint variant. Must be left `false`: AWS
+    # publishes no FIPS endpoint for S3 Vectors in any region, so setting it is rejected at
+    # initialization rather than failing later on DNS. Front the service with a FIPS-terminating
+    # endpoint and set `serviceUrl` if a validated path is required
     boolean fips = false;
 |};
 

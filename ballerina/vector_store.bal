@@ -92,7 +92,9 @@ public isolated class VectorStore {
     # + index - The target vector index, by ARN or by bucket and index name
     # + config - Store behaviour: the content metadata key, default filters, whether to hydrate
     # embeddings on query, the filter-only scan cap, and whether to validate the index at startup
-    # + httpConfig - HTTP client configuration for the underlying connection to S3 Vectors
+    # + httpConfig - HTTP client configuration for the underlying connection to S3 Vectors.
+    # The HTTP version and chunking settings are always forced to HTTP/1.1 and
+    # `CHUNKING_NEVER`, since S3 Vectors rejects HTTP/2 and chunked request bodies
     # + return - An `ai:Error` if the index identifier is invalid, credentials cannot be
     # resolved, the HTTP client cannot be created, or (when `config.validateIndexOnInit` is
     # `true`) the index cannot be read or is misconfigured for this store
@@ -133,6 +135,27 @@ public isolated class VectorStore {
         }
         self.credentialProvider = provider;
 
+        // S3 Vectors rejects both HTTP/2 and chunked request bodies, so the two Ballerina
+        // defaults that produce them are overridden here on top of whatever the caller supplied.
+        //
+        // HTTP/2: identical, byte-for-byte identically signed GetIndex requests multiplexed as
+        // successive streams on one connection come back 200 and 400 ("Invalid request",
+        // x-amzn-errortype: ValidationException) at random, failing roughly a fifth of calls. The
+        // cause on the service side is unknown; HTTP/1.1 avoids it entirely.
+        //
+        // Chunking: a SigV4 `rest-json` request is signed over its whole body and needs a
+        // Content-Length to be verified. A chunked body carries neither, so every payload large
+        // enough to trip Ballerina's `CHUNKING_AUTO` threshold (e.g. a 4096-dimension vector) is
+        // rejected with the same 400, deterministically.
+        //
+        // Both AWS SDKs default to HTTP/1.1 with an explicit Content-Length for the same reason:
+        // the Java SDK v2 pins `Protocol.HTTP1_1`, and botocore sets Content-Length whenever the
+        // body length is known while its urllib3 transport offers only "http/1.1" over ALPN.
+        //
+        // `http:ClientConfiguration` is a closed record that is neither `anydata` nor cloneable, so
+        // the two fields are set on the caller's record rather than on a copy.
+        httpConfig.httpVersion = http:HTTP_1_1;
+        httpConfig.http1Settings.chunking = http:CHUNKING_NEVER;
         http:Client|http:ClientError httpClient = new (serviceUrl, httpConfig);
         if httpClient is http:ClientError {
             return error ai:Error(
@@ -231,6 +254,12 @@ public isolated class VectorStore {
     #
     # `Configuration.filters` (if set) is combined with `query.filters` under `AND`.
     #
+    # `QueryVectors` is an approximate search, and asking it for very few results makes it
+    # explore correspondingly little of the index — a `topK` of 1 was measured returning an
+    # empty result for a vector that was certainly stored, on more than half of attempts.
+    # Retrying does not help, so this always asks the service for at least 10 results and
+    # truncates to `query.topK` locally; callers get the `topK` they asked for.
+    #
     # `Embedding` values are `[]` unless `Configuration.returnVectorData` is enabled — S3
     # Vectors' `QueryVectors` never returns vector data, and hydrating it costs an additional
     # batched `GetVectors` call per query.
@@ -278,8 +307,12 @@ public isolated class VectorStore {
 
     // Runs an approximate nearest-neighbour search, paginating on `nextToken` until `topK`
     // results are collected or the response reports no further page. Every page re-sends the
-    // same query vector, `topK`, and filter, per S3 Vectors' pagination contract for this
-    // operation.
+    // same query vector, requested `topK`, and filter, per S3 Vectors' pagination contract for
+    // this operation.
+    //
+    // The value sent to the service is floored at `MIN_QUERY_TOP_K` because QueryVectors' recall
+    // degrades sharply at very small `topK` (see the constant); the caller's own `topK` still
+    // bounds what this returns, so the surplus is discarded locally.
     private isolated function queryByEmbedding(ai:Vector embedding, ai:MetadataFilters? filters, int topK)
             returns ai:VectorMatch[]|ai:Error {
         json filterJson = ();
@@ -290,6 +323,7 @@ public isolated class VectorStore {
             }
         }
         json queryVectorJson = {"float32": embedding};
+        int requestedTopK = topK < MIN_QUERY_TOP_K ? MIN_QUERY_TOP_K : topK;
 
         ai:VectorMatch[] matches = [];
         string? nextToken = ();
@@ -297,7 +331,7 @@ public isolated class VectorStore {
         // that breaks once a response reports no further `nextToken`.
         while true {
             QueryVectorsResponse page = check queryVectors(self.httpClient, self.credentialProvider, self.host,
-                    self.region, self.index, queryVectorJson, topK, filterJson, nextToken);
+                    self.region, self.index, queryVectorJson, requestedTopK, filterJson, nextToken);
             string metric = page.distanceMetric ?: (self.distanceMetric ?: "cosine");
             foreach QueryOutputVector item in page.vectors {
                 ai:Chunk|ai:Error chunk = metadataToChunk(item.metadata ?: {}, self.contentKey);

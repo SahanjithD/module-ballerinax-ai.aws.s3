@@ -341,6 +341,36 @@ function testQueryNegativeTopKSendsTenThousandToQueryVectors() returns error? {
 }
 
 @test:Config {}
+function testQuerySmallTopKIsFlooredOnTheWireButNotInTheResult() returns error? {
+    VectorStore store = check newTestStore();
+    mockS3VectorsControl.queueResponse("QueryVectors", {
+        body: {
+            distanceMetric: "cosine",
+            vectors: [
+                {key: "vec-1", distance: 0.0, metadata: {content: "a"}},
+                {key: "vec-2", distance: 0.1, metadata: {content: "b"}}
+            ]
+        }
+    });
+    ai:VectorMatch[] matches = check store.query({embedding: [0.1, 0.2], topK: 1});
+    json[] requests = mockS3VectorsControl.requestsFor("QueryVectors");
+    test:assertEquals(requests[0].topK, MIN_QUERY_TOP_K,
+            "A topK below the floor must be widened on the wire, since QueryVectors' recall " +
+            "collapses at very small topK");
+    test:assertEquals(matches.length(), 1, "The caller must still get exactly the topK it asked for");
+    test:assertEquals(matches[0].id, "vec-1", "Truncation must keep the closest matches");
+}
+
+@test:Config {}
+function testQueryTopKAboveTheFloorIsSentUnchanged() returns error? {
+    VectorStore store = check newTestStore();
+    mockS3VectorsControl.queueResponse("QueryVectors", {body: {distanceMetric: "cosine", vectors: []}});
+    ai:VectorMatch[] _ = check store.query({embedding: [0.1, 0.2], topK: 25});
+    json[] requests = mockS3VectorsControl.requestsFor("QueryVectors");
+    test:assertEquals(requests[0].topK, 25, "A topK above the floor must be sent as-is");
+}
+
+@test:Config {}
 function testQueryRejectsSparseEmbedding() returns error? {
     VectorStore store = check newTestStore();
     ai:VectorMatch[]|ai:Error result =
