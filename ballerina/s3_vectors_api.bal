@@ -47,8 +47,20 @@ const decimal RETRY_MAX_DELAY_SECONDS = 15.0d;
 // host from the partition's dualstack DNS suffix unconditionally — there is no non-dualstack
 // variant — so `dualstack: true` is required, not optional. Verified against the service's
 // bundled endpoint-rule-set and empirically against the SDK: the correct host is
-// `s3vectors.{region}.api.aws` (`s3vectors-fips.{region}.api.aws` under FIPS).
+// `s3vectors.{region}.api.aws`.
+//
+// That rule set also defines a `s3vectors-fips.{region}.api.aws` variant, but AWS has not
+// deployed it: the name does not resolve in any region, GovCloud included, while the equivalent
+// `s3-fips.{region}.amazonaws.com` for S3 proper does. A FIPS request would therefore fail on DNS
+// somewhere well downstream of the mistake, so `fips: true` is refused here instead.
 isolated function resolveServiceEndpoint(VectorStoreConnectionConfig config) returns [string, string]|ai:Error {
+    if config.fips {
+        return error ai:Error(
+            "Amazon S3 Vectors publishes no FIPS endpoint in any region, so 'fips' cannot be " +
+            "enabled: the host it would target, 's3vectors-fips.{region}.api.aws', does not exist. " +
+            "If a FIPS-validated path is mandatory for this workload, S3 Vectors cannot provide one " +
+            "itself — terminate FIPS in front of the service and point 'serviceUrl' at that endpoint");
+    }
     string? serviceUrl = config.serviceUrl;
     if serviceUrl is string {
         string host = serviceUrl;
@@ -64,7 +76,9 @@ isolated function resolveServiceEndpoint(VectorStoreConnectionConfig config) ret
         }
         return [serviceUrl, host];
     }
-    string host = aws:resolveEndpointHost("s3vectors", config.region, {dualstack: true, fips: config.fips});
+    // `fips` is pinned false rather than passed through: the only accepted value is false, and
+    // the guard above has already rejected the alternative.
+    string host = aws:resolveEndpointHost("s3vectors", config.region, {dualstack: true, fips: false});
     return [string `https://${host}`, host];
 }
 

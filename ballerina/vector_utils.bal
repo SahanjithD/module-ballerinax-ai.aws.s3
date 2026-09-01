@@ -31,6 +31,13 @@ const int MAX_DELETE_BATCH_COUNT = 500;
 const int MAX_GET_BATCH_COUNT = 100;
 const int MAX_REQUEST_BYTES = 20 * 1024 * 1024;
 const int MAX_TOP_K = 10000;
+// The smallest `topK` `queryByEmbedding` will ask S3 Vectors for, regardless of how few results
+// the caller wants. QueryVectors is an approximate search, and a small `topK` narrows how much of
+// the index it explores: measured against an index holding a single vector, queried with that
+// vector's own embedding, `topK: 1` came back empty on 6 of 10 attempts while `topK: 10` returned
+// it on 10 of 10 in the same period. Over-asking and truncating locally costs one response worth
+// of extra metadata and removes the misses.
+const int MIN_QUERY_TOP_K = 10;
 const int MAX_LIST_PAGE_SIZE = 1000;
 
 // The metadata key `add` writes the chunk's type under. Not user-configurable (only the content

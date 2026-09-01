@@ -442,7 +442,7 @@ check knowledgeBase.ingest(documents);
 | `auth` | `auth:AuthConfig` | `auth:DEFAULT_CREDENTIALS` | Same credential shapes as the loader's `ConnectionConfig` — see Prerequisites above |
 | `region` | `aws:Region \| string` | `US_EAST_1` | Must match the region the vector bucket was created in. **S3 Vectors is not available in every AWS region** — check current availability before choosing one |
 | `serviceUrl` | `string?` | resolved from `region` | Overrides the resolved endpoint (scheme included). For testing against a local or proxied endpoint only |
-| `fips` | `boolean` | `false` | Target the FIPS 140-validated endpoint variant |
+| `fips` | `boolean` | `false` | Must stay `false`. AWS publishes no FIPS endpoint for S3 Vectors in any region (unlike S3 proper), so setting it is rejected at initialization. If a FIPS-validated path is required, put a FIPS-terminating endpoint in front of the service and set `serviceUrl` to it |
 
 #### Index (`IndexIdentifier`)
 
