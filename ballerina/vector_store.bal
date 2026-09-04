@@ -94,7 +94,9 @@ public isolated class VectorStore {
     # embeddings on query, the filter-only scan cap, and whether to validate the index at startup
     # + httpConfig - HTTP client configuration for the underlying connection to S3 Vectors.
     # The HTTP version and chunking settings are always forced to HTTP/1.1 and
-    # `CHUNKING_NEVER`, since S3 Vectors rejects HTTP/2 and chunked request bodies
+    # `CHUNKING_NEVER`, since S3 Vectors rejects HTTP/2 and chunked request bodies, and
+    # `retryConfig` is always cleared, since this store retries S3 Vectors calls itself with a
+    # fresh SigV4 signature on each attempt
     # + return - An `ai:Error` if the index identifier is invalid, credentials cannot be
     # resolved, the HTTP client cannot be created, or (when `config.validateIndexOnInit` is
     # `true`) the index cannot be read or is misconfigured for this store
@@ -106,7 +108,7 @@ public isolated class VectorStore {
         string? indexArn = index.indexArn;
         string? vectorBucketName = index.vectorBucketName;
         string? indexName = index.indexName;
-        if indexArn is string {
+        if indexArn is string {  
             if vectorBucketName is string || indexName is string {
                 return error ai:Error(
                     "The S3 Vectors index must be identified by either 'indexArn' alone, or by " +
@@ -123,7 +125,7 @@ public isolated class VectorStore {
         if endpointResult is ai:Error {
             return error ai:Error("Failed to initialize the S3 Vectors vector store", endpointResult);
         }
-        [string, string] [serviceUrl, host] = endpointResult;
+        [string, string] [endpointUrl, host] = endpointResult;
         self.host = host;
         self.region = connectionConfig.region;
 
@@ -156,7 +158,11 @@ public isolated class VectorStore {
         // the two fields are set on the caller's record rather than on a copy.
         httpConfig.httpVersion = http:HTTP_1_1;
         httpConfig.http1Settings.chunking = http:CHUNKING_NEVER;
-        http:Client|http:ClientError httpClient = new (serviceUrl, httpConfig);
+        // Retries are driven by `invoke`, which re-signs on every attempt. Leaving a caller's
+        // `retryConfig` in place would nest the two schedules — `MAX_ATTEMPTS` requests per
+        // HTTP-level retry — so the transport's own retries are cleared here.
+        httpConfig.retryConfig = ();
+        http:Client|http:ClientError httpClient = new (endpointUrl, httpConfig);
         if httpClient is http:ClientError {
             return error ai:Error(
                 "Failed to initialize the S3 Vectors vector store: could not create the HTTP client",
@@ -232,7 +238,7 @@ public isolated class VectorStore {
             ai:Error? result = putVectors(self.httpClient, self.credentialProvider, self.host, self.region,
                     self.index, batch);
             if result is ai:Error {
-                return error ai:Error(
+                return wrapServiceError(
                     string `Failed to add vectors to S3 Vectors: ${completedBatches} of ${batches.length()} ` +
                     string `batches (${completedVectors} of ${wireVectors.length()} vectors) succeeded before ` +
                     string `this batch failed: ${result.message()}`, result);
@@ -472,7 +478,7 @@ public isolated class VectorStore {
             ai:Error? result = deleteVectors(self.httpClient, self.credentialProvider, self.host, self.region,
                     self.index, batch);
             if result is ai:Error {
-                return error ai:Error(
+                return wrapServiceError(
                     string `Failed to delete vectors from S3 Vectors: ${completedBatches} of ` +
                     string `${batches.length()} batches (${completedKeys} of ${keys.length()} keys) succeeded ` +
                     string `before this batch failed: ${result.message()}`, result);

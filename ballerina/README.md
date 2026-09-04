@@ -439,10 +439,9 @@ check knowledgeBase.ingest(documents);
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `auth` | `auth:AuthConfig` | `auth:DEFAULT_CREDENTIALS` | Same credential shapes as the loader's `ConnectionConfig` — see Prerequisites above |
+| `auth` | `auth:AuthConfig` | — | Required. Same credential shapes as the loader's `ConnectionConfig` — see Prerequisites above; pass `auth:DEFAULT_CREDENTIALS` for the standard AWS provider chain |
 | `region` | `aws:Region \| string` | `US_EAST_1` | Must match the region the vector bucket was created in. **S3 Vectors is not available in every AWS region** — check current availability before choosing one |
-| `serviceUrl` | `string?` | resolved from `region` | Overrides the resolved endpoint (scheme included). For testing against a local or proxied endpoint only |
-| `fips` | `boolean` | `false` | Must stay `false`. AWS publishes no FIPS endpoint for S3 Vectors in any region (unlike S3 proper), so setting it is rejected at initialization. If a FIPS-validated path is required, put a FIPS-terminating endpoint in front of the service and set `serviceUrl` to it |
+| `endpoint` | `aws:EndpointConfig?` | resolved from `region` | The same field the loader's `s3:ConnectionConfig` takes. `customEndpoint` overrides the resolved endpoint (scheme included), for testing against a local or proxied endpoint. `fips` must stay `false` — AWS publishes no FIPS endpoint for S3 Vectors in any region (unlike S3 proper), so setting it is rejected at initialization; if a FIPS-validated path is required, put a FIPS-terminating endpoint in front of the service and set `customEndpoint` to it. `dualstack` is ignored and always on, since S3 Vectors publishes no `amazonaws.com` endpoint variant |
 
 #### Index (`IndexIdentifier`)
 
@@ -462,6 +461,35 @@ Identify the target index one of two ways — not both:
 | `returnVectorData` | `boolean` | `false` | Whether `query` issues a follow-up `GetVectors` call to populate `ai:VectorMatch.embedding`. `QueryVectors` never returns vector data on its own; enabling this roughly doubles request volume and cost |
 | `maxListScan` | `int` | `100000` | Cap on how many vectors a filter-only query (no embedding — the shape `deleteByFilter` issues) will scan via `ListVectors` before failing, since S3 Vectors cannot filter server-side without a query vector |
 | `validateIndexOnInit` | `boolean` | `true` | Whether `init` reads the index configuration back with `GetIndex` and validates the content key up front |
+
+#### HTTP
+
+`VectorStore.init` takes an optional fourth argument, an `http:ClientConfiguration`, for timeouts,
+pools and TLS. Three of its fields are overridden regardless of what is passed: `httpVersion` and
+`http1Settings.chunking` are pinned to HTTP/1.1 and `CHUNKING_NEVER` (S3 Vectors rejects HTTP/2
+and chunked request bodies), and `retryConfig` is cleared — the store runs its own retry loop,
+re-signing each attempt, and a transport-level retry on top would nest the two schedules.
+
+#### Errors
+
+Every failure is an `ai:Error`. Those involving the S3 Vectors service itself — endpoint
+resolution, credentials, signing, transport, and every non-2xx response — additionally carry the
+response's particulars as error detail fields, named to match `aws:ErrorDetails`:
+
+```ballerina
+ai:Error? result = vectorStore.add(entries);
+if result is ai:Error {
+    map<anydata|readonly> detail = result.detail();
+    log:printError("S3 Vectors call failed", statusCode = detail["httpStatusCode"],
+            errorCode = detail["errorCode"], requestId = detail["requestId"]);
+}
+```
+
+The fields are `httpStatusCode`, `httpStatusText`, `errorCode`, `errorMessage` and `requestId` —
+the last being the `x-amzn-requestid` value AWS support asks for first. A field the response did
+not carry reads back as `()`, as do all of them on a failure raised before a response was
+received or by the store's own argument validation (an invalid index identifier, a sparse
+embedding, an untranslatable filter).
 
 ### Limitations
 

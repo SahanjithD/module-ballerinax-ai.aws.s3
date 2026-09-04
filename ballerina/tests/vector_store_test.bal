@@ -34,7 +34,7 @@ function newTestStore(Configuration config = {validateIndexOnInit: false}) retur
         {
             auth: {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"},
             region: "us-east-1",
-            serviceUrl: MOCK_SERVICE_URL
+            endpoint: {customEndpoint: MOCK_SERVICE_URL}
         },
         {vectorBucketName: TEST_VECTOR_BUCKET, indexName: TEST_INDEX},
         config
@@ -89,7 +89,7 @@ function testInitValidatesContentKeyIsNonFilterable() returns error? {
         {
             auth: {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"},
             region: "us-east-1",
-            serviceUrl: MOCK_SERVICE_URL
+            endpoint: {customEndpoint: MOCK_SERVICE_URL}
         },
         {vectorBucketName: TEST_VECTOR_BUCKET, indexName: TEST_INDEX});
     test:assertFalse(store is ai:Error,
@@ -117,7 +117,7 @@ function testInitFailsWhenContentKeyIsFilterable() returns error? {
         {
             auth: {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"},
             region: "us-east-1",
-            serviceUrl: MOCK_SERVICE_URL
+            endpoint: {customEndpoint: MOCK_SERVICE_URL}
         },
         {vectorBucketName: TEST_VECTOR_BUCKET, indexName: TEST_INDEX});
     test:assertTrue(store is ai:Error,
@@ -134,7 +134,7 @@ isolated function testVectorStoreInitAcceptsDefaultCredentialsConfigShape() {
     // panicking, matching the loader's own test for this — actual resolution only happens on
     // the first signed request, not at construction time.
     VectorStore|ai:Error store = new (
-        {auth: auth:DEFAULT_CREDENTIALS, region: "us-east-1", serviceUrl: MOCK_SERVICE_URL},
+        {auth: auth:DEFAULT_CREDENTIALS, region: "us-east-1", endpoint: {customEndpoint: MOCK_SERVICE_URL}},
         {vectorBucketName: TEST_VECTOR_BUCKET, indexName: TEST_INDEX},
         {validateIndexOnInit: false});
     test:assertFalse(store is ai:Error, "The DEFAULT_CREDENTIALS config shape must be accepted at construction");
@@ -634,6 +634,45 @@ function testValidationExceptionSurfacesFieldList() returns error? {
                 "The individual fieldList entry must be surfaced verbatim, got: " + result.message());
         test:assertTrue(result.message().includes("vectors.0.data"),
                 "The field path must be surfaced too, got: " + result.message());
+    }
+}
+
+@test:Config {}
+function testServiceErrorCarriesResponseDetails() returns error? {
+    VectorStore store = check newTestStore();
+    mockS3VectorsControl.queueResponse("PutVectors", {
+        statusCode: 403,
+        headers: {"x-amzn-errortype": "AccessDeniedException", "x-amzn-requestid": "RID-12345"},
+        body: {message: "User is not authorized to perform s3vectors:PutVectors"}
+    });
+    ai:Error? result = store.add([textEntry([0.1, 0.2], "x", "vec-1")]);
+    test:assertTrue(result is ai:Error);
+    if result is ai:Error {
+        map<anydata|readonly> detail = result.detail();
+        test:assertEquals(detail["httpStatusCode"], 403, "The response status must be carried structurally");
+        test:assertEquals(detail["errorCode"], "AccessDeniedException",
+                "The AWS error type must be carried structurally, not only inside the message");
+        test:assertEquals(detail["requestId"], "RID-12345",
+                "The x-amzn-requestid must be carried — it is the first thing AWS support asks for");
+        test:assertEquals(detail["errorMessage"], "User is not authorized to perform s3vectors:PutVectors",
+                "The service's own message must be readable without parsing the annotated message");
+    }
+}
+
+// A local or proxied endpoint standing in for S3 Vectors sends neither header, and the details it
+// could not supply must read back as absent rather than as an empty string.
+@test:Config {}
+function testServiceErrorOmitsDetailsTheResponseDidNotCarry() returns error? {
+    VectorStore store = check newTestStore();
+    // A non-retryable status, so this is the single response the store sees.
+    mockS3VectorsControl.queueResponse("PutVectors", {statusCode: 400, body: {}});
+    ai:Error? result = store.add([textEntry([0.1, 0.2], "x", "vec-1")]);
+    test:assertTrue(result is ai:Error);
+    if result is ai:Error {
+        map<anydata|readonly> detail = result.detail();
+        test:assertEquals(detail["httpStatusCode"], 400, "The status is always known and always carried");
+        test:assertEquals(detail["errorCode"], (), "An absent x-amzn-errortype must read back as nil, not empty");
+        test:assertEquals(detail["requestId"], (), "An absent x-amzn-requestid must read back as nil, not empty");
     }
 }
 
