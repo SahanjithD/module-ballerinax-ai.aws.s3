@@ -22,25 +22,30 @@ import ballerinax/aws.auth;
 # S3 object storage: it has its own endpoint, its own `s3vectors` IAM namespace, and its own
 # API, so it is configured separately from the `s3:ConnectionConfig` the data loader takes.
 public type VectorStoreConnectionConfig record {|
-    # Where credentials come from. Defaults to the standard AWS provider chain (environment
-    # variables, web identity token, IAM Identity Center, shared config/credentials files,
-    # external process, container credentials, and EC2 instance profile — first one that answers)
-    auth:AuthConfig auth = auth:DEFAULT_CREDENTIALS;
+    # Where credentials come from. Pass `auth:DEFAULT_CREDENTIALS` to use the standard AWS
+    # provider chain (environment variables, web identity token, IAM Identity Center, shared
+    # config/credentials files, external process, container credentials, and EC2 instance
+    # profile — first one that answers), or a static or profile config to name them explicitly
+    auth:AuthConfig auth;
 
     # The region hosting the vector bucket. S3 Vectors is not available in every region, and the
     # bucket must live in the region set here
     aws:Region|string region = aws:US_EAST_1;
 
-    # Overrides the resolved service endpoint, scheme included (e.g. `http://localhost:9090`).
-    # Intended for testing against a local or proxied endpoint; leave unset for normal use, in
-    # which case the endpoint is derived from `region`
-    string serviceUrl?;
-
-    # Whether to target a FIPS 140-validated endpoint variant. Must be left `false`: AWS
-    # publishes no FIPS endpoint for S3 Vectors in any region, so setting it is rejected at
-    # initialization rather than failing later on DNS. Front the service with a FIPS-terminating
-    # endpoint and set `serviceUrl` if a validated path is required
-    boolean fips = false;
+    # Endpoint options, in the same shape `s3:ConnectionConfig` takes. Leave unset for normal
+    # use, in which case the endpoint is derived from `region`. Two of its three fields behave
+    # differently here than they do for S3 proper, because S3 Vectors publishes a narrower set
+    # of endpoints:
+    #
+    # - `customEndpoint` overrides the resolved endpoint, scheme included (e.g.
+    # `http://localhost:9090`), and is intended for testing against a local or proxied endpoint
+    # - `fips` must be left `false`. AWS publishes no FIPS endpoint for S3 Vectors in any region,
+    # so setting it is rejected at initialization rather than failing later on DNS. Front the
+    # service with a FIPS-terminating endpoint and set `customEndpoint` if a validated path is
+    # required
+    # - `dualstack` is ignored and always treated as `true`. S3 Vectors resolves through the
+    # partition's dualstack DNS suffix unconditionally — there is no `amazonaws.com` variant
+    aws:EndpointConfig endpoint?;
 |};
 
 # Identifies the target vector index. S3 Vectors accepts either the bucket and index names

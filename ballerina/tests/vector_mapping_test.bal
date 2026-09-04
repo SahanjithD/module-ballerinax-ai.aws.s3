@@ -26,6 +26,10 @@ import ballerinax/aws.auth;
 // own file (`vector_filter_test.bal`); this one covers everything else — endpoint resolution,
 // distance-to-score conversion, metadata round-tripping, entry validation, and batching.
 
+// Endpoint resolution ignores credentials entirely, but `auth` is a required field on
+// `VectorStoreConnectionConfig`, so these tests supply a placeholder that is never used to sign.
+final readonly & auth:StaticAuthConfig TEST_AUTH = {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"};
+
 // ---------------------------------------------------------------------------
 // Endpoint resolution — the canary for the riskiest assumption in this module (see
 // `resolveServiceEndpoint` in `s3_vectors_api.bal`): `s3vectors` is absent from the SDK's
@@ -43,7 +47,7 @@ isolated function testAwsResolveEndpointHostUsesApiAwsSuffix() {
 
 @test:Config {}
 isolated function testResolveServiceEndpointRejectsFips() {
-    [string, string]|ai:Error result = resolveServiceEndpoint({region: aws:US_EAST_1, fips: true});
+    [string, string]|ai:Error result = resolveServiceEndpoint({auth: TEST_AUTH, region: aws:US_EAST_1, endpoint: {fips: true}});
     test:assertTrue(result is ai:Error,
             "AWS deploys no FIPS endpoint for S3 Vectors, so 'fips' must be rejected rather than " +
             "resolved to a host that does not exist");
@@ -56,15 +60,16 @@ isolated function testResolveServiceEndpointRejectsFips() {
 @test:Config {}
 isolated function testResolveServiceEndpointRejectsFipsEvenWithServiceUrl() {
     [string, string]|ai:Error result =
-        resolveServiceEndpoint({region: aws:US_EAST_1, fips: true, serviceUrl: "https://proxy.example"});
+        resolveServiceEndpoint({auth: TEST_AUTH, region: aws:US_EAST_1,
+                endpoint: {fips: true, customEndpoint: "https://proxy.example"}});
     test:assertTrue(result is ai:Error,
-            "'fips' must not be silently ignored alongside a serviceUrl — that would leave the " +
+            "'fips' must not be silently ignored alongside a customEndpoint — that would leave the " +
             "caller believing they are on a validated path");
 }
 
 @test:Config {}
 isolated function testResolveServiceEndpointDerivesHostAndUrl() {
-    [string, string]|ai:Error result = resolveServiceEndpoint({region: aws:US_WEST_2});
+    [string, string]|ai:Error result = resolveServiceEndpoint({auth: TEST_AUTH, region: aws:US_WEST_2});
     test:assertFalse(result is ai:Error, "Endpoint resolution must succeed for a plain region config");
     if result is [string, string] {
         var [url, host] = result;
@@ -76,8 +81,8 @@ isolated function testResolveServiceEndpointDerivesHostAndUrl() {
 @test:Config {}
 isolated function testResolveServiceEndpointHonoursServiceUrlOverride() {
     [string, string]|ai:Error result =
-        resolveServiceEndpoint({region: aws:US_EAST_1, serviceUrl: "http://localhost:9090"});
-    test:assertFalse(result is ai:Error, "An explicit serviceUrl override must resolve without error");
+        resolveServiceEndpoint({auth: TEST_AUTH, region: aws:US_EAST_1, endpoint: {customEndpoint: "http://localhost:9090"}});
+    test:assertFalse(result is ai:Error, "An explicit customEndpoint override must resolve without error");
     if result is [string, string] {
         var [url, host] = result;
         test:assertEquals(url, "http://localhost:9090", "The override URL must be passed through as-is");

@@ -40,46 +40,45 @@ const decimal RETRY_MAX_DELAY_SECONDS = 15.0d;
 
 // Resolves the S3 Vectors endpoint for a connection config, returning both the full URL (for the
 // `http:Client`) and the bare host (for the SigV4 `host` header, which must carry no scheme).
+// Both come from `ballerinax/aws`'s resolver, so a `customEndpoint` override and the partition
+// DNS suffixes are handled exactly as they are for `ballerinax/aws.s3`.
 //
-// `s3vectors` is absent from the endpoint metadata bundled with `ballerinax/aws` 1.0.1, so an
-// unqualified `aws:resolveEndpoint` call falls through to the wrong, non-existent host
+// `s3vectors` is absent from the endpoint metadata bundled with `ballerinax/aws`, so an
+// unqualified resolve falls through to the wrong, non-existent host
 // `s3vectors.{region}.amazonaws.com`. AWS's own endpoint rule set for this service resolves the
 // host from the partition's dualstack DNS suffix unconditionally — there is no non-dualstack
-// variant — so `dualstack: true` is required, not optional. Verified against the service's
-// bundled endpoint-rule-set and empirically against the SDK: the correct host is
-// `s3vectors.{region}.api.aws`.
+// variant — so `dualstack: true` is forced here rather than passed through from the caller.
+// Verified against the service's bundled endpoint-rule-set and empirically against the SDK: the
+// correct host is `s3vectors.{region}.api.aws`.
 //
 // That rule set also defines a `s3vectors-fips.{region}.api.aws` variant, but AWS has not
 // deployed it: the name does not resolve in any region, GovCloud included, while the equivalent
 // `s3-fips.{region}.amazonaws.com` for S3 proper does. A FIPS request would therefore fail on DNS
 // somewhere well downstream of the mistake, so `fips: true` is refused here instead.
 isolated function resolveServiceEndpoint(VectorStoreConnectionConfig config) returns [string, string]|ai:Error {
-    if config.fips {
+    aws:EndpointConfig endpointConfig = config?.endpoint ?: {};
+    if endpointConfig.fips {
         return error ai:Error(
-            "Amazon S3 Vectors publishes no FIPS endpoint in any region, so 'fips' cannot be " +
-            "enabled: the host it would target, 's3vectors-fips.{region}.api.aws', does not exist. " +
+            "Amazon S3 Vectors publishes no FIPS endpoint in any region, so 'endpoint.fips' cannot " +
+            "be enabled: the host it would target, 's3vectors-fips.{region}.api.aws', does not exist. " +
             "If a FIPS-validated path is mandatory for this workload, S3 Vectors cannot provide one " +
-            "itself — terminate FIPS in front of the service and point 'serviceUrl' at that endpoint");
+            "itself — terminate FIPS in front of the service and point 'endpoint.customEndpoint' at " +
+            "that endpoint");
     }
-    string? serviceUrl = config.serviceUrl;
-    if serviceUrl is string {
-        string host = serviceUrl;
-        if host.startsWith("https://") {
-            host = host.substring(8);
-        } else if host.startsWith("http://") {
-            host = host.substring(7);
-        }
-        // Strip a trailing path, if any, leaving `host[:port]` for the SigV4 `host` header.
-        int? slashIndex = host.indexOf("/");
-        if slashIndex is int {
-            host = host.substring(0, slashIndex);
-        }
-        return [serviceUrl, host];
-    }
+
     // `fips` is pinned false rather than passed through: the only accepted value is false, and
     // the guard above has already rejected the alternative.
-    string host = aws:resolveEndpointHost("s3vectors", config.region, {dualstack: true, fips: false});
-    return [string `https://${host}`, host];
+    aws:EndpointConfig resolverConfig = {dualstack: true, fips: false};
+    string? customEndpoint = endpointConfig.customEndpoint;
+    if customEndpoint is string {
+        resolverConfig.customEndpoint = customEndpoint;
+    }
+    string url = aws:resolveEndpoint("s3vectors", config.region, resolverConfig);
+    // `resolveEndpointHost` strips the scheme but keeps any path a `customEndpoint` carries;
+    // the SigV4 `host` header takes `host[:port]` only.
+    string host = aws:resolveEndpointHost("s3vectors", config.region, resolverConfig);
+    int? slashIndex = host.indexOf("/");
+    return [url, slashIndex is int ? host.substring(0, slashIndex) : host];
 }
 
 // Signs and sends one S3 Vectors operation, retrying transient failures with a fresh signature
@@ -191,8 +190,47 @@ isolated function describeTarget(json requestPayload) returns string {
     return "the target index";
 }
 
-// Maps a non-2xx S3 Vectors response to a typed `ai:Error`, naming the likely fix where AWS's
-// own message would otherwise leave the caller guessing.
+// Attaches the details of a failed S3 Vectors response to the error as detail fields.
+//
+// `ai:Error`'s detail type is the open `error:Detail`, so these ride along on a plain `ai:Error`
+// without a distinct error type of our own — the same mechanism the loader's `recoverableInWalk`
+// flag uses. Field names match `aws:ErrorDetails`. A value the response did not carry is passed
+// as `()`, which reads back identically to an absent key.
+isolated function serviceError(string message, int statusCode, string statusText, string? errorCode,
+        string? errorMessage, string? requestId, error? cause = ()) returns ai:Error {
+    return error ai:Error(message, cause, httpStatusCode = statusCode, httpStatusText = statusText,
+            errorCode = errorCode, errorMessage = errorMessage, requestId = requestId);
+}
+
+// Re-raises a failure under a message that adds the caller's own context — how far a batched
+// operation got before it failed, say — carrying any response details forward. A plain wrapper
+// would leave the status, error code and request id reachable only by walking `cause()`.
+isolated function wrapServiceError(string message, ai:Error cause) returns ai:Error {
+    map<anydata> detail = {};
+    foreach [string, anydata|readonly] [key, value] in cause.detail().entries() {
+        if value is anydata {
+            detail[key] = value;
+        }
+    }
+    int? statusCode = detail["httpStatusCode"] is int ? <int>detail["httpStatusCode"] : ();
+    if statusCode is () {
+        // Not a failure carrying response details (a pre-response failure, or an error raised by
+        // this module's own validation), so there is nothing to carry forward.
+        return error ai:Error(message, cause);
+    }
+    return serviceError(message, statusCode, stringDetail(detail, "httpStatusText") ?: "",
+            stringDetail(detail, "errorCode"), stringDetail(detail, "errorMessage"),
+            stringDetail(detail, "requestId"), cause);
+}
+
+isolated function stringDetail(map<anydata> detail, string key) returns string? {
+    anydata value = detail[key];
+    return value is string ? value : ();
+}
+
+// Maps a non-2xx S3 Vectors response to an `ai:Error`, naming the likely fix where AWS's own
+// message would otherwise leave the caller guessing, and carrying the response's status, error
+// code, message and request id as detail fields.
 isolated function mapErrorResponse(string operation, int statusCode, http:Response response, json requestPayload)
         returns ai:Error {
     string errorType = "";
@@ -202,6 +240,14 @@ isolated function mapErrorResponse(string operation, int statusCode, http:Respon
         // the type.
         int? colonIndex = typeHeader.indexOf(":");
         errorType = colonIndex is int ? typeHeader.substring(0, colonIndex) : typeHeader;
+    }
+
+    // The request id is what AWS support asks for first, and it appears nowhere in the response
+    // body — only in this header.
+    string requestId = "";
+    string|http:HeaderNotFoundError requestIdHeader = response.getHeader("x-amzn-requestid");
+    if requestIdHeader is string {
+        requestId = requestIdHeader;
     }
 
     string awsMessage = "";
@@ -225,47 +271,45 @@ isolated function mapErrorResponse(string operation, int statusCode, http:Respon
     }
 
     string detail = awsMessage == "" ? string `HTTP ${statusCode}` : string `HTTP ${statusCode}: ${awsMessage}`;
-
+    string statusText = response.reasonPhrase;
     string target = describeTarget(requestPayload);
+
+    string message;
     if statusCode == 403 {
-        return error ai:Error(
+        message =
             string `Access denied calling S3 Vectors '${operation}' on ${target} (${detail}). Metadata and ` +
             "metadata filters on QueryVectors/ListVectors additionally require the 's3vectors:GetVectors' " +
             "permission on top of the operation's own permission — this is the most common cause of a " +
             "403 here. Verify the caller has PutVectors, QueryVectors, GetVectors, DeleteVectors, " +
-            "ListVectors, and GetIndex on the target index.");
-    }
-    if statusCode == 404 {
-        return error ai:Error(
+            "ListVectors, and GetIndex on the target index.";
+    } else if statusCode == 404 {
+        message =
             string `S3 Vectors '${operation}' failed: ${target} was not found (${detail}). Also confirm S3 ` +
-            "Vectors is available in the configured region — it is not offered in every AWS region.");
-    }
-    if statusCode == 400 && errorType == "ValidationException" {
-        if fieldList.length() > 0 {
-            string[] fieldMessages = from ValidationExceptionField 'field in fieldList
-                select string `'${'field.path}': ${'field.message}`;
-            return error ai:Error(
-                string `S3 Vectors '${operation}' rejected the request: ${", ".'join(...fieldMessages)}`);
-        }
-        return error ai:Error(string `S3 Vectors '${operation}' rejected the request (${detail})`);
-    }
-    if statusCode == 400 && errorType.startsWith("Kms") {
-        return error ai:Error(
+            "Vectors is available in the configured region — it is not offered in every AWS region.";
+    } else if statusCode == 400 && errorType == "ValidationException" && fieldList.length() > 0 {
+        string[] fieldMessages = from ValidationExceptionField 'field in fieldList
+            select string `'${'field.path}': ${'field.message}`;
+        message = string `S3 Vectors '${operation}' rejected the request: ${", ".'join(...fieldMessages)}`;
+    } else if statusCode == 400 && errorType == "ValidationException" {
+        message = string `S3 Vectors '${operation}' rejected the request (${detail})`;
+    } else if statusCode == 400 && errorType.startsWith("Kms") {
+        message =
             string `S3 Vectors '${operation}' failed due to the vector bucket's encryption configuration ` +
-            string `(${errorType}, ${detail}). Check the bucket's KMS key state and permissions.`);
-    }
-    if statusCode == 402 {
-        return error ai:Error(
+            string `(${errorType}, ${detail}). Check the bucket's KMS key state and permissions.`;
+    } else if statusCode == 402 {
+        message =
             string `S3 Vectors '${operation}' failed: a service quota was exceeded (${detail}). See the ` +
-            "S3 Vectors limits (vectors per index, metadata size, request rate) in the AWS documentation.");
-    }
-    if isRetryableStatus(statusCode) {
-        return error ai:Error(
+            "S3 Vectors limits (vectors per index, metadata size, request rate) in the AWS documentation.";
+    } else if isRetryableStatus(statusCode) {
+        message =
             string `S3 Vectors '${operation}' failed after ${MAX_ATTEMPTS} attempts (${detail}). ` +
             "This is a retryable condition (timeout, throttling, or a transient server error); the " +
-            "configured retries were exhausted.");
+            "configured retries were exhausted.";
+    } else {
+        message = string `S3 Vectors '${operation}' failed (${detail})`;
     }
-    return error ai:Error(string `S3 Vectors '${operation}' failed (${detail})`);
+    return serviceError(message, statusCode, statusText, errorType == "" ? () : errorType,
+            awsMessage == "" ? () : awsMessage, requestId == "" ? () : requestId);
 }
 
 // Merges the target index identifier into a request body, following the exactly-one-of contract
