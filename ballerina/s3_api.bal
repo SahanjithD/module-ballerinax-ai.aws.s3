@@ -90,6 +90,15 @@ isolated function listObjectPage(s3:Client s3Client, string bucket, string? pref
     // call into an unfiltered whole-bucket listing whose paging never terminated, because
     // each response carried a fresh continuation token. Do not reintroduce the spread form.
     s3:ListObjectsResponse|s3:Error listing = s3Client->listObjects(bucket, config);
+    if listing is s3:NoSuchBucketError {
+        // S3 answers a request for a bucket in another region with a redirect that surfaces the
+        // same way as a bucket that does not exist, and the loader shares one region across
+        // every source, so both are worth naming here.
+        return error ai:Error(
+            string `Bucket '${bucket}' was not found. Check the bucket name, and that it is in the ` +
+            "region configured on the connection config — the loader uses one region for every " +
+            string `source. (${listing.message()})`, listing);
+    }
     if listing is s3:Error {
         return error ai:Error(
             string `Failed to list objects in bucket '${bucket}'` +
@@ -129,23 +138,22 @@ isolated function openObjectStream(s3:Client s3Client, string bucket, string key
     return objStream;
 }
 
-// Resolves an exact object with HEAD requests (no body download): returns a normalized item if
+// Resolves an exact object with a HEAD request (no body download): returns a normalized item if
 // the object exists, `()` if it does not, or an `ai:Error` on a transport failure. Uses HEAD
 // rather than a ListObjectsV2 probe because HEAD is order-independent (so it also works on
 // directory buckets, whose listings are not lexicographically ordered) and needs only
-// `s3:GetObject` on the key rather than `s3:ListBucket` on the bucket. `doesObjectExist`
-// cleanly distinguishes "not found" (false) from a transport error; the follow-up
-// `getObjectMetadata` supplies the size/ETag/last-modified/storage-class the caller needs.
+// `s3:GetObject` on the key rather than `s3:ListBucket` on the bucket.
+//
+// "Missing" is read off the connector's `s3:NoSuchKeyError` rather than from a preceding
+// `doesObjectExist` probe, which would double the round trips for every explicitly named key.
+// A key the caller cannot read rather than one that is absent still surfaces as a failure: S3
+// answers HEAD with 403 when the caller lacks permission, which the connector maps to the base
+// `s3:Error`, not to `NoSuchKeyError`.
 isolated function headObject(s3:Client s3Client, string bucket, string key) returns S3Item?|ai:Error {
-    boolean|s3:Error exists = s3Client->doesObjectExist(bucket, key);
-    if exists is s3:Error {
-        return error ai:Error(
-            string `Failed to check whether '${key}' exists in bucket '${bucket}': ${exists.message()}`, exists);
-    }
-    if !exists {
+    s3:ObjectMetadata|s3:Error metadata = s3Client->getObjectMetadata(bucket, key);
+    if metadata is s3:NoSuchKeyError {
         return ();
     }
-    s3:ObjectMetadata|s3:Error metadata = s3Client->getObjectMetadata(bucket, key);
     if metadata is s3:Error {
         return error ai:Error(
             string `Failed to read metadata for '${key}' in bucket '${bucket}': ${metadata.message()}`, metadata);
