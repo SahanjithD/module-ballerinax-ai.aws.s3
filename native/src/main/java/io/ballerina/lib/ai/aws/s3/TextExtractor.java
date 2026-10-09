@@ -177,25 +177,28 @@ public final class TextExtractor {
     }
 
     /**
-     * Converts any failure into a Ballerina error.
+     * Converts a failure into a Ballerina error, keeping the original exception as its cause.
      *
-     * <p>{@link Throwable} is caught rather than {@link Exception} deliberately. A Java
-     * {@code Error} escaping an external function surfaces in Ballerina as a <em>panic</em>,
-     * which bypasses every {@code check} in the loader and cannot be recovered by a caller —
-     * defeating the package's guarantee that failures arrive as a handleable {@code ai:Error}.
-     * The realistic cases are all reachable from untrusted S3 content: a {@code
-     * StackOverflowError} from a deeply nested PDF object graph, an {@code OutOfMemoryError}
-     * from a compression bomb, and the {@code NoSuchMethodError} class of dependency conflict
-     * this class is otherwise architected to avoid.
+     * <p>{@link Throwable} is caught rather than {@link Exception} because a Java {@code Error}
+     * escaping an external function surfaces in Ballerina as a <em>panic</em>, which a caller
+     * cannot handle. Untrusted S3 content can trigger a {@code StackOverflowError} (a deeply
+     * nested PDF object graph) or a {@code LinkageError} (a dependency conflict); both affect
+     * only the document being parsed, so they become an ordinary error for that object.
+     *
+     * <p>Other {@link VirtualMachineError}s, chiefly {@link OutOfMemoryError}, are rethrown: the
+     * JVM may no longer be in a usable state, so carrying on with the next object is unsafe.
      *
      * <p>The exception's simple class name is always included, because several POI and PDFBox
      * exceptions carry a {@code null} message and would otherwise produce an empty error.
      */
     private static Object toBallerinaError(Throwable t) {
+        if (t instanceof VirtualMachineError && !(t instanceof StackOverflowError)) {
+            throw (VirtualMachineError) t;
+        }
         String message = t.getMessage();
         String detail = message != null && !message.isBlank()
                 ? t.getClass().getSimpleName() + ": " + message
                 : t.getClass().getSimpleName();
-        return ErrorCreator.createError(StringUtils.fromString(detail));
+        return ErrorCreator.createError(StringUtils.fromString(detail), t);
     }
 }
