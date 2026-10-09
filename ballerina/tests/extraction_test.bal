@@ -71,6 +71,16 @@ isolated function testExtractTextFromPdfFixture() returns error? {
     test:assertEquals(metadata["key"], "corpus/sample.pdf");
 }
 
+// A PDF carrying an XMP metadata packet, as PDF/A files and Adobe output do. Tika's PDF parser
+// reads it through `tika-parser-xmp-commons`, which must be declared in Ballerina.toml: without it
+// every such PDF fails with a NoClassDefFoundError, which the plain fixtures above never trigger.
+@test:Config {}
+isolated function testExtractTextFromPdfWithXmpMetadata() returns error? {
+    ai:TextDocument doc = check buildFromFixture("xmp.pdf", "corpus/xmp.pdf").ensureType();
+    test:assertTrue(contentOf(doc).includes("PDF with XMP metadata"),
+            "The text of a PDF with XMP metadata must be extracted; got: " + contentOf(doc));
+}
+
 @test:Config {}
 isolated function testExtractTextFromDocxFixture() returns error? {
     ai:TextDocument doc = check buildFromFixture("sample.docx", "corpus/sample.docx").ensureType();

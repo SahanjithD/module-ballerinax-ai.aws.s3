@@ -39,6 +39,8 @@ type S3Item record {|
     // (GLACIER/DEEP_ARCHIVE) require a RestoreObject before they can be read, so the loader
     // skips or rejects them by this field rather than failing on a GetObject error.
     s3:StorageClass storageClass = s3:STANDARD;
+    // The object's Content-Type. Known only for a key resolved with HEAD; listings carry none.
+    string? contentType = ();
 |};
 
 // One page of an S3 object listing.
@@ -91,13 +93,9 @@ isolated function listObjectPage(s3:Client s3Client, string bucket, string? pref
     // each response carried a fresh continuation token. Do not reintroduce the spread form.
     s3:ListObjectsResponse|s3:Error listing = s3Client->listObjects(bucket, config);
     if listing is s3:NoSuchBucketError {
-        // S3 answers a request for a bucket in another region with a redirect that surfaces the
-        // same way as a bucket that does not exist, and the loader shares one region across
-        // every source, so both are worth naming here.
         return error ai:Error(
-            string `Bucket '${bucket}' was not found. Check the bucket name, and that it is in the ` +
-            "region configured on the connection config — the loader uses one region for every " +
-            string `source. (${listing.message()})`, listing);
+            string `Bucket '${bucket}' was not found. Check the bucket name and the connection's ` +
+            string `region. (${listing.message()})`, listing);
     }
     if listing is s3:Error {
         return error ai:Error(
@@ -131,6 +129,13 @@ isolated function listObjectPage(s3:Client s3Client, string bucket, string? pref
 isolated function openObjectStream(s3:Client s3Client, string bucket, string key)
         returns stream<byte[], error?>|ai:Error {
     stream<byte[], error?>|error objStream = s3Client->getObject(bucket, key);
+    if objStream is s3:NoSuchKeyError {
+        // Deleted between being listed and being read: a prefix walk skips it. Other failures
+        // (permissions, connectivity) affect every object, so they still fail the load.
+        return error ai:Error(
+            string `Object '${key}' in bucket '${bucket}' no longer exists: ${objStream.message()}`, objStream,
+            recoverableInWalk = true);
+    }
     if objStream is error {
         return error ai:Error(
             string `Failed to open object '${key}' in bucket '${bucket}': ${objStream.message()}`, objStream);
@@ -163,7 +168,8 @@ isolated function headObject(s3:Client s3Client, string bucket, string key) retu
         size: metadata.contentLength,
         eTag: unquote(metadata.eTag),
         lastModified: metadata.lastModified,
-        storageClass: metadata.storageClass
+        storageClass: metadata.storageClass,
+        contentType: metadata?.contentType
     };
 }
 
@@ -177,8 +183,8 @@ isolated function isArchivedStorageClass(s3:StorageClass storageClass) returns b
 }
 
 // Whether an error is a per-object failure that a prefix walk may skip rather than abort the
-// whole load (e.g. an undecodable text object), as opposed to a fatal error such as an auth or
-// connectivity failure. Signalled by a `recoverableInWalk` flag on the error's detail.
+// whole load (undecodable text, a failed extraction, an object deleted after listing), as opposed
+// to a fatal error such as an auth or connectivity failure. Signalled by a `recoverableInWalk` flag on the error's detail.
 isolated function isRecoverableInWalk(error e) returns boolean {
     var flag = e.detail()["recoverableInWalk"];
     return flag is boolean && flag;

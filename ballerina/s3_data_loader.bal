@@ -34,13 +34,11 @@ const int MAX_KEYS_PER_PAGE = 1000;
 // listing, only lengthen how long a stuck one spins before reporting.
 const int MAX_LIST_PAGES = 10000;
 
-# A data loader that reads objects from AWS S3 buckets as text for a RAG ingestion
-# pipeline. It implements `ai:DataLoader`, so what it loads feeds directly into
-# `ai:KnowledgeBase.ingest`.
-#
-# Natively-textual objects (`md`, `html`, `htm`, `txt`, `csv`, `json`, `xml`, `yaml`, …)
-# are decoded directly; `pdf`, `docx`, `pptx`, and `xlsx` are extracted in memory via Apache
-# Tika and POI. Legacy binary Office formats (`doc`, `ppt`, `xls`) are not supported.
+// Natively-textual objects (`md`, `html`, `txt`, `csv`, `json`, ...) are decoded directly; `pdf`,
+// `docx`, `pptx` and `xlsx` are extracted in memory with Apache Tika and POI. Legacy binary Office
+// formats (`doc`, `ppt`, `xls`) are not supported.
+
+# Loads text documents from AWS S3 buckets.
 @display {
     label: "AWS S3 Text Data Loader"
 }
@@ -53,17 +51,23 @@ public isolated class TextDataLoader {
 
     # Initializes the AWS S3 data loader.
     #
-    # + s3Connection - Either an `s3:ConnectionConfig` describing how to reach S3 (the loader
-    #                  builds the client from it), or an already-configured `s3:Client` to reuse
-    # + sources - One or more buckets, each with the paths (prefixes/keys) to load
-    # + options - Loader-wide options: the in-memory per-object size ceiling
-    # + return - An `ai:Error` if the configuration is invalid or the client cannot be built
+    # + s3Connection - Connection settings for S3, or an existing `s3:Client` to reuse
+    # + sources - The buckets and paths to load documents from
+    # + options - Limits that apply to every object loaded
+    # + return - An `ai:Error` if the configuration is invalid or the client cannot be created
     public isolated function init(
             @display {label: "Connection Config"} s3:ConnectionConfig|s3:Client s3Connection,
             @display {label: "Data Sources"} Source[] sources,
             @display {label: "Loader Options"} LoaderOptions options = {}) returns ai:Error? {
         if sources.length() == 0 {
             return error ai:Error("At least one source must be provided to the AWS S3 data loader");
+        }
+        foreach Source src in sources {
+            string[]? paths = src?.paths;
+            if paths is string[] && paths.length() == 0 {
+                return error ai:Error(string `Source '${src.bucket}' has an empty 'paths' list, which ` +
+                    "would load nothing. Omit 'paths' to load the whole bucket");
+            }
         }
         if options.maxObjectSize < 1 {
             return error ai:Error("maxObjectSize must be at least 1");
@@ -75,8 +79,8 @@ public isolated class TextDataLoader {
 
     # Loads the configured S3 objects as text documents.
     #
-    # + return - The single loaded document when exactly one object is resolved, an array of
-    #            documents otherwise, or an `ai:Error` on failure
+    # + return - One document if exactly one object was loaded, otherwise an array of documents,
+    # or an `ai:Error` if loading fails
     public isolated function load() returns ai:Document[]|ai:Document|ai:Error {
         ai:Document[] documents = [];
         foreach Source src in self.sources {
@@ -136,6 +140,10 @@ public isolated class TextDataLoader {
             // named this key, and a silent empty result would hide the reason from them.
             return [check self.loadExactKey(bucket, exact)];
         }
+        if documents.length() == 0 {
+            // Neither a key nor a folder with anything loadable: most often a mistyped path.
+            log:printWarn("A configured path matched no loadable objects", bucket = bucket, path = path);
+        }
         return documents;
     }
 
@@ -148,7 +156,7 @@ public isolated class TextDataLoader {
     // Loads an explicitly named key. Unlike a prefix walk, an unsupported named key is an
     // error (the caller asked for it by name), not a silent skip.
     private isolated function loadExactKey(string bucket, S3Item item) returns ai:TextDocument|ai:Error {
-        match classify(item.key, ()) {
+        match classifyObject(item.key, item.contentType) {
             UNSUPPORTED_OFFICE => {
                 return error ai:Error(string `Unsupported file type for key '${item.key}' in bucket ` +
                     string `'${bucket}': text extraction for the legacy binary Microsoft Office formats ` +
@@ -292,9 +300,9 @@ public isolated class TextDataLoader {
                 return ();
             }
         }
-        // A single problem object must not fail an entire corpus load, so archived, over-sized
-        // and undecodable objects are skipped with a warning during a prefix walk (a named key
-        // hits the hard-error paths in loadExactKey instead).
+        // A single problem object must not fail an entire corpus load, so archived, over-sized,
+        // undecodable and unparseable objects, and ones deleted after listing, are skipped with a
+        // warning during a prefix walk (a named key hits the hard-error paths in loadExactKey).
         if isArchivedStorageClass(item.storageClass) {
             log:printWarn("Skipping an archived object; restore it with RestoreObject before it " +
                     "can be loaded", bucket = bucket, key = item.key, storageClass = item.storageClass);
@@ -308,8 +316,8 @@ public isolated class TextDataLoader {
         ai:TextDocument?|ai:Error document = self.loadObject(bucket, item);
         if document is ai:Error {
             if isRecoverableInWalk(document) {
-                log:printWarn("Skipping an object whose text could not be decoded",
-                        bucket = bucket, key = item.key);
+                log:printWarn("Skipping an object that could not be loaded", bucket = bucket, key = item.key,
+                        reason = document.message());
                 return ();
             }
             return document;
@@ -324,7 +332,8 @@ public isolated class TextDataLoader {
     private isolated function loadObject(string bucket, S3Item item) returns ai:TextDocument?|ai:Error {
         stream<byte[], error?> objStream = check openObjectStream(self.s3Client, bucket, item.key);
         byte[] content = check drainStream(objStream, self.maxObjectSize, bucket, item.key);
-        return buildDocument(content, bucket, item.key, item.size, item.lastModified, item.eTag);
+        return buildDocument(content, bucket, item.key, item.size, item.lastModified, item.eTag,
+                item.contentType);
     }
 }
 
