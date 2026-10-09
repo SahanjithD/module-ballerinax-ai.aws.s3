@@ -124,12 +124,11 @@ The loader's first argument is either an
 — the `ballerinax/aws.s3` connector's own configuration, from which the loader builds a client —
 or an already-configured `s3:Client` you want it to reuse.
 
-`ConnectionConfig` has two fields: `auth` and `region`.
-
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `auth` | `auth:AuthConfig` — e.g. `auth:StaticAuthConfig \| auth:ProfileAuthConfig \| auth:DEFAULT_CREDENTIALS` (from `ballerinax/aws.auth`) | — | How to authenticate (see below) |
-| `region` | `Region` | `US_EAST_1` (`"us-east-1"`) | **Must match the region each bucket was created in** — a mismatch fails with an opaque `PermanentRedirect` error. The bucket's region is shown in the S3 console's Buckets list |
+| `region` | `aws:Region \| string` | `US_EAST_1` (`"us-east-1"`) | The region the buckets are in |
+| `endpoint` | `aws:EndpointConfig?` | resolved from `region` | FIPS and dual-stack options, or a `customEndpoint` for LocalStack or another S3-compatible service |
 
 ```ballerina
 import ballerinax/aws.auth as awsAuth;
@@ -180,7 +179,7 @@ one loader; their documents are aggregated in the order given.
 
 | `Source` field | Type | Default | Description |
 |---|---|---|---|
-| `bucket` | `string` | — | The bucket name; must live in the connection's region |
+| `bucket` | `string` | — | The bucket name |
 | `paths` | `string[]?` | `()` (omit → whole bucket) | One or more object keys or key prefixes. Omit it to load the whole bucket. See "How paths are resolved" below |
 | `recursive` | `boolean` | `false` | Whether to descend into nested prefixes. Applies to every prefix in `paths` |
 | `includeExtensions` | `string[]?` | `()` (all types) | Case-insensitive extension allowlist; a leading dot is optional. Applies to every prefix in `paths` |
@@ -210,9 +209,17 @@ S3 has no folders — only keys that happen to contain `/`. So:
 - With `recursive: false`, only keys directly under the prefix are loaded — a key whose remainder
   after the prefix contains another `/` is skipped.
 
-An unsupported file type named **explicitly** as an exact key is an error. An unsupported file
-found while **walking a prefix** is skipped with a logged warning, so one stray image cannot fail
-an entire corpus load.
+An object that can't be loaded is handled differently depending on how it was reached:
+
+- **Found while walking a prefix:** unsupported types, archived objects (`GLACIER`, `DEEP_ARCHIVE`),
+  objects over `maxObjectSize`, text that isn't valid UTF-8, PDF or Office files that can't be
+  parsed, and objects deleted after being listed are **skipped with a logged warning**, so one bad
+  file can't fail a whole corpus load.
+- **Named as an exact key:** the same cases are an **error**, since the caller asked for that object.
+- **Either way:** a failure that isn't specific to one object, such as missing permissions or a
+  connection error, makes `load()` return an error.
+
+A path that matches no loadable object returns no documents and logs a warning.
 
 > **Collision to be aware of:** if a bucket holds *both* an object at key `reports` and objects
 > under `reports/`, then the path `"reports"` resolves the single object and ignores the folder
@@ -223,7 +230,7 @@ an entire corpus load.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `maxObjectSize` | `int` | `104857600` (100 MiB) | Largest single object read into memory; a bigger object fails with a clear error rather than risking an out-of-memory condition |
+| `maxObjectSize` | `int` | `104857600` (100 MiB) | Largest single object read into memory. A bigger object is skipped during a prefix walk and is an error when named as a key |
 
 ```ballerina
 s3:TextDataLoader loader = check new (connectionConfig, sources,
@@ -241,7 +248,7 @@ natively-textual formats S3 buckets commonly hold.
 | Type | Extensions | How the text is obtained |
 |---|---|---|
 | Markup | `md`, `markdown`, `html`, `htm` | Decoded verbatim (tags and all); stripping is the chunker's job |
-| Plain text | `txt`, `text`, `csv`, `tsv`, `json`, `xml`, `yaml`, `yml`, `log`, `ini`, `conf`, `properties`, `css`, `js`, `ts` | Decoded directly as UTF-8 |
+| Plain text | `txt`, `text`, `csv`, `tsv`, `json`, `xml`, `yaml`, `yml`, `log`, `ini`, `conf`, `properties`, `css`, `js` | Decoded directly as UTF-8 |
 | PDF | `pdf` | Apache Tika `PDFParser` + PDFBox, in memory |
 | Word | `docx` | Apache POI `XWPFWordExtractor`, in memory |
 | PowerPoint | `pptx` | Apache POI `SlideShowExtractor`, in memory |
@@ -249,8 +256,17 @@ natively-textual formats S3 buckets commonly hold.
 | **Legacy binary Office** | `doc`, `ppt`, `xls` | **Not supported** — convert to the OOXML `.docx` / `.pptx` / `.xlsx` or PDF |
 | Anything else | images, audio, unknown binary | Skipped (an error if named explicitly) |
 
-Object metadata is attached to every document: `fileName` (the key), `mimeType`, `fileSize`,
-`modifiedAt`, plus the open fields `bucket`, `key`, and `eTag`.
+The type is decided by the key's extension. A key named directly in `paths` whose extension isn't
+recognised (an extensionless `README`, say) falls back to its S3 `Content-Type`.
+
+**Scanned or image-only documents are not supported.** There is no OCR, so a PDF or Office file
+whose pages are only images yields no text (it loads as a document with empty content).
+
+Object metadata is attached to every document: `fileName` (the last segment of the key),
+`mimeType`, `fileSize`, `modifiedAt`, plus the open fields `bucket`, `key` (the full key), and
+`eTag`. Properties embedded in the file itself (a PDF's title or author, for example) are not
+copied. Chunks inherit document metadata, and S3 Vectors allows only 50 metadata keys and 2 KB of
+filterable metadata per vector, which a PDF's full property set can exceed.
 
 ## Limitations
 
@@ -272,8 +288,8 @@ Please read these before indexing a large or busy bucket.
   but `load()` returns a shorter array with no programmatic signal. A caller cannot distinguish
   "nothing matched" from "several objects were skipped" without reading the logs.
 - **`load()` has no overall time limit.** The paging loop always terminates, but `ballerinax/aws.s3`
-  4.0.0 exposes no timeout, retry or HTTP configuration on `ConnectionConfig`, so a stalled
-  connection blocks the call indefinitely. Apply a deadline on the calling side if you need one.
+  exposes no timeout, retry or HTTP configuration on `ConnectionConfig`, so a stalled connection
+  blocks the call indefinitely. Apply a deadline on the calling side if you need one.
 - **S3 Express One Zone (directory) buckets are not usable.** Every object in one reports the
   `EXPRESS_ONEZONE` storage class, which is absent from the connector's `StorageClass` enum, so
   listing and metadata calls fail to deserialize. The exact-key path is designed to work on them —
@@ -284,33 +300,29 @@ Please read these before indexing a large or busy bucket.
   writes across page requests can cause objects to be missed or double-counted — inherent to
   paginated listing.
 - **Each object is read entirely into memory.** Extraction reads from an in-memory buffer so that
-  no temporary file is ever written, but each object must therefore fit in the heap. `maxObjectSize`
-  (default 100 MiB) bounds each individual object read; an object larger than that is a clear error
-  rather than an attempted load.
+  no temporary file is ever written, but each object must therefore fit in the heap, roughly twice
+  over while it is passed to the extractor. `maxObjectSize` (default 100 MiB) bounds each object;
+  a larger one is skipped in a prefix walk and is an error when named as a key.
 - **Non-recursive filtering.** The loader lists with delimiter `/`, so S3 returns only same-level
   keys (descendants roll into `CommonPrefixes`, which the connector drops); a client-side filter
   stays as a backstop.
 - **No `versionId` selection.** The loader always reads the current version of each object. The
   underlying connector *can* fetch a specific version, but the loader does not expose it, so a
   corpus cannot be pinned to specific object versions.
-- **An exact key is resolved by listing its prefix**, not with a `HEAD`, to avoid a download just
-  to test existence. Functionally transparent; noted for cost accounting on very large prefixes.
 - **Legacy binary Office formats are unsupported.** `.doc`, `.ppt` and `.xls` are recognised only
   so they can be rejected with a format-specific message or skipped. Convert them to their OOXML
   successors (`.docx`/`.pptx`/`.xlsx`) or PDF. The OOXML `.xlsx` is extracted via POI's
   `XSSFExcelExtractor`: cells are rendered tab-separated, one row per line, each sheet prefixed with
   its name, and formula cells contribute their last cached result.
-- **One unreadable object fails the whole load.** If an object is deleted between being listed
-  and being downloaded, or its content cannot be decoded or parsed, the entire `load()` returns an
-  error rather than skipping it. This is deliberate — a silently incomplete RAG index is worse
-  than a failed one — but it means a corpus in flux may need a retry. (Objects of *unsupported
-  types* are skipped, not failed; this applies to genuine read/parse failures.)
+- **Apache POI's safety limits apply.** POI rejects an Office file whose extracted text passes its
+  size cap or whose compression ratio looks like a zip bomb, which a very large or highly
+  compressible `.xlsx`/`.docx` can trip well below `maxObjectSize`. Such a file is skipped in a
+  prefix walk and is an error when named as a key. The limits are JVM-wide POI settings, so the
+  loader does not change them.
 - **No requester-pays support.** The connector's configuration exposes no requester-pays option,
   so cross-account requester-pays buckets cannot be read.
-- **AWS endpoints only.** The connector's `ConnectionConfig` takes a `region` but no endpoint
-  override, so S3-compatible services (MinIO, LocalStack, Cloudflare R2) cannot be targeted.
-- **All buckets in one loader share one region**, since the region is set on the connection. A
-  bucket in a different region fails with an opaque AWS redirect error; use one loader per region.
+- **All buckets in one loader share one connection**, including its region. Use a separate loader
+  for buckets that need a different connection.
 
 ## Vector store
 
@@ -335,7 +347,7 @@ index must already exist, and **two of the index's settings are immutable once c
 - **The chunk's text content must be stored as a non-filterable metadata key.** S3 Vectors caps
   *filterable* metadata at 2 KB per vector — far below what chunk text routinely needs — while
   *non-filterable* metadata has a much larger 40 KB budget. `VectorStore` stores chunk text under
-  the metadata key named by `Configuration.contentKey` (`"content"` by default), and **that key
+  the metadata key named by `VectorStoreConfig.contentKey` (`"content"` by default), and **that key
   must be declared in the index's `nonFilterableMetadataKeys` at creation time**. Getting this
   wrong means deleting and recreating the index — it cannot be changed afterwards.
 
@@ -354,7 +366,7 @@ aws s3vectors create-index \
 ```
 
 By default, `VectorStore.init` calls `GetIndex` once at startup and fails with an actionable
-message if the content key was left filterable — see `Configuration.validateIndexOnInit` below.
+message if the content key was left filterable — see `VectorStoreConfig.validateIndexOnInit` below.
 
 ### Grant the required IAM permissions
 
@@ -416,8 +428,10 @@ s3:VectorStore vectorStore = check new (
 ```ballerina
 import ballerina/ai;
 
+// From your embedding model; the length must match the index's dimension.
+ai:Vector embedding = [0.12, 0.98, 0.33];
 check vectorStore.add([
-    {embedding: [0.12, 0.98, /* ... */], chunk: {'type: "text-chunk", content: "..."}}
+    {embedding, chunk: {'type: "text-chunk", content: "..."}}
 ]);
 
 ai:VectorMatch[] matches = check vectorStore.query({embedding: queryEmbedding, topK: 5});
@@ -439,36 +453,36 @@ check knowledgeBase.ingest(documents);
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `auth` | `auth:AuthConfig` | — | Required. Same credential shapes as the loader's `ConnectionConfig` — see Prerequisites above; pass `auth:DEFAULT_CREDENTIALS` for the standard AWS provider chain |
-| `region` | `aws:Region \| string` | `US_EAST_1` | Must match the region the vector bucket was created in. **S3 Vectors is not available in every AWS region** — check current availability before choosing one |
-| `endpoint` | `aws:EndpointConfig?` | resolved from `region` | The same field the loader's `s3:ConnectionConfig` takes. `customEndpoint` overrides the resolved endpoint (scheme included), for testing against a local or proxied endpoint. `fips` must stay `false` — AWS publishes no FIPS endpoint for S3 Vectors in any region (unlike S3 proper), so setting it is rejected at initialization; if a FIPS-validated path is required, put a FIPS-terminating endpoint in front of the service and set `customEndpoint` to it. `dualstack` is ignored and always on, since S3 Vectors publishes no `amazonaws.com` endpoint variant |
+| `auth` | `auth:AuthConfig` | — | Same credential shapes as the loader's `ConnectionConfig`; pass `auth:DEFAULT_CREDENTIALS` for the standard AWS provider chain |
+| `region` | `aws:Region \| string` | — | The region the vector bucket is in. **S3 Vectors is not available in every AWS region** |
+| `endpoint` | `aws:EndpointConfig?` | resolved from `region` | `customEndpoint` overrides the endpoint, e.g. for testing. `fips` must stay `false`: AWS publishes no FIPS endpoint for S3 Vectors. `dualstack` is ignored, since S3 Vectors has only dual-stack endpoints |
+| `httpConfig` | `HttpConfig` | `{}` | HTTP client settings; see below |
 
-#### Index (`IndexIdentifier`)
+`HttpConfig` exposes `timeout` (seconds, default 30), `proxy`, `secureSocket`, `poolConfig`,
+`circuitBreaker`, `socketConfig` and `responseLimits`, with the same meaning as in
+`http:ClientConfiguration`. The store always uses HTTP/1.1 with no chunked request bodies, because
+S3 Vectors rejects both HTTP/2 and chunked bodies, and it runs its own retries, re-signing each
+attempt, so those settings are not exposed.
+
+#### Index (`VectorIndex`)
 
 Identify the target index one of two ways — not both:
 
 | Field | Type | Description |
 |---|---|---|
 | `vectorBucketName` + `indexName` | `string?` | The bucket and index name, together |
-| `indexArn` | `string?` | The index ARN, on its own |
+| `indexArn` | `string?` | The index ARN, on its own. Needed for an index owned by another AWS account, since names resolve in the caller's own account |
 
-#### Store behaviour (`Configuration`)
+#### Store behaviour (`VectorStoreConfig`)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `contentKey` | `string` | `"content"` | The metadata key chunk text is stored under. Must be declared non-filterable on the index — see above |
 | `filters` | `ai:MetadataFilters?` | `()` | Applied to every query, combined with any per-query filters under `AND` |
-| `returnVectorData` | `boolean` | `false` | Whether `query` issues a follow-up `GetVectors` call to populate `ai:VectorMatch.embedding`. `QueryVectors` never returns vector data on its own; enabling this roughly doubles request volume and cost |
-| `maxListScan` | `int` | `100000` | Cap on how many vectors a filter-only query (no embedding — the shape `deleteByFilter` issues) will scan via `ListVectors` before failing, since S3 Vectors cannot filter server-side without a query vector |
-| `validateIndexOnInit` | `boolean` | `true` | Whether `init` reads the index configuration back with `GetIndex` and validates the content key up front |
-
-#### HTTP
-
-`VectorStore.init` takes an optional fourth argument, an `http:ClientConfiguration`, for timeouts,
-pools and TLS. Three of its fields are overridden regardless of what is passed: `httpVersion` and
-`http1Settings.chunking` are pinned to HTTP/1.1 and `CHUNKING_NEVER` (S3 Vectors rejects HTTP/2
-and chunked request bodies), and `retryConfig` is cleared — the store runs its own retry loop,
-re-signing each attempt, and a transport-level retry on top would nest the two schedules.
+| `queryMode` | `QueryMode?` | the index's mode | `CLASSIC` filters during the search; `ENHANCED` filters before it, so a filtered query isn't cut short. AWS rejects `CLASSIC` on an `ENHANCED` index |
+| `returnVectorData` | `boolean` | `false` | Whether `query` returns embeddings. `QueryVectors` never returns vector data, so this costs a follow-up `GetVectors` call per query |
+| `maxListScan` | `int` | `100000` | Cap on how many vectors a query without an embedding (the shape `deleteByFilter` issues) scans with `ListVectors` before failing |
+| `validateIndexOnInit` | `boolean` | `true` | Whether `init` reads the index with `GetIndex` and checks its dimension, metric and content key up front |
 
 #### Errors
 
@@ -479,9 +493,9 @@ response's particulars as error detail fields, named to match `aws:ErrorDetails`
 ```ballerina
 ai:Error? result = vectorStore.add(entries);
 if result is ai:Error {
-    map<anydata|readonly> detail = result.detail();
-    log:printError("S3 Vectors call failed", statusCode = detail["httpStatusCode"],
-            errorCode = detail["errorCode"], requestId = detail["requestId"]);
+    map<anydata|readonly> & readonly detail = result.detail();
+    io:println("S3 Vectors call failed: status ", detail["httpStatusCode"], ", error code ",
+            detail["errorCode"], ", request id ", detail["requestId"]);
 }
 ```
 
@@ -496,19 +510,27 @@ embedding, an untranslatable filter).
 - **Dense vectors only.** S3 Vectors has no sparse or hybrid index type. `add` and `query` reject
   anything other than a plain `ai:Vector` (`float[]`) embedding.
 - **Text chunks only.** A vector's content is stored as metadata, which must be JSON — so
-  `chunk.content` must be a `string`. Image, audio, file and binary chunks are rejected.
+  `chunk.content` must be a `string`. Image, audio, file and binary chunks are rejected, including
+  ones whose content is a URL string.
+- **Two metadata keys are reserved.** The store writes the chunk text under `contentKey` and the
+  chunk type under `_chunkType`. `add` rejects a chunk whose own metadata uses either key.
 - **A query with no embedding scans the index.** `QueryVectors` requires a query vector and
   cannot filter without one, so a query carrying only metadata filters — or neither, the shape
   `ai:VectorKnowledgeBase.deleteByFilter` issues — pages through every vector with `ListVectors`
-  and evaluates filters in Ballerina, bounded by `Configuration.maxListScan`. This is the only way
+  and evaluates filters in Ballerina, bounded by `VectorStoreConfig.maxListScan`. This is the only way
   `deleteByFilter` can work against this store at all, but it is an O(index size) operation on a
   large index.
-- **`EQUAL` against array-valued metadata can disagree between the two filter paths.** Server-side,
-  S3 Vectors' `$eq` matches an array-valued metadata field if *any* element equals the filter
-  value. The local filter evaluator used by the no-embedding path above (and so `deleteByFilter`)
-  instead does a plain `==` against the whole stored value. A filter on a custom `ai:Metadata`
-  field that holds a JSON array can therefore match different vectors depending on whether the
-  query carried an embedding or not.
+- **On a `CLASSIC` index, a filtered query with an embedding can return fewer than `topK`
+  results**, because filters are applied during the approximate search. `ENHANCED` indexes (the
+  default for vector buckets created on or after 30 September 2026) filter first. Set
+  `VectorStoreConfig.queryMode` to `ENHANCED` to get that behaviour on an older index.
+- **An `ENHANCED` query allows at most 100 filter constraints.** Each compared value counts once,
+  so an `IN` with five values counts five. S3 Vectors rejects a larger filter with a
+  `ValidationException` naming the field.
+- **Array-valued metadata is only fully supported with `EQUAL`.** Like S3 Vectors' `$eq`, `EQUAL`
+  matches an array field if any element is equal, on both filter paths. AWS documents no array
+  behaviour for the other operators, so the no-embedding path compares the whole array for them,
+  which may not match what `QueryVectors` does.
 - **`similarityScore` is a converted value, not the raw S3 Vectors distance.** S3 Vectors returns
   a distance (lower is more similar); `ai:VectorMatch.similarityScore` must be higher-is-better.
   For `cosine`, `1.0 - distance` recovers the true cosine similarity. For `euclidean`,
@@ -519,8 +541,8 @@ embedding, an untranslatable filter).
 - **Timestamps are stored as epoch-seconds numbers, not ISO-8601 strings.** `ai:Metadata`'s
   `createdAt`/`modifiedAt` are `time:Utc` values; S3 Vectors' `$gt`/`$gte`/`$lt`/`$lte` range
   operators only accept numbers, so encoding them as date strings (as the Pinecone vector store
-  does) would leave range filters on dates silently non-functional. A filter written against
-  either key must use an epoch-seconds number to match what was stored.
+  does) would leave range filters on dates silently non-functional. A filter on either key can use
+  a `time:Utc` value (converted automatically) or an epoch-seconds number.
 - **`embedding` is empty unless `returnVectorData` is enabled.** `QueryVectors` never returns
   vector data; see Configuration above.
 - **`delete` is idempotent.** Deleting a key that does not exist in the index is not an error,
@@ -528,8 +550,8 @@ embedding, an untranslatable filter).
 - **No index management.** Creating, deleting or listing vector buckets and indexes is out of
   scope for this store — see "Before you start" above for creating one with the AWS CLI.
 - **Metadata limits are AWS's, enforced client-side where practical.** Up to 40 KB total metadata
-  per vector, 2 KB filterable, 50 keys, key names up to 63 characters, vector keys up to 1,024
-  characters. `add` validates these before sending and names the offending vector's key in the
+  per vector, 2 KB filterable, 50 keys, vector keys up to 1,024 characters, and a `contentKey` of
+  up to 63 characters (the limit on non-filterable key names). `add` validates these before sending and names the offending vector's key in the
   error, rather than surfacing an opaque `ValidationException`.
 - **No S3 Vectors emulator exists**, so this store's transport layer is tested against an
   in-process mock HTTP service rather than a live endpoint or LocalStack. Verify against a real

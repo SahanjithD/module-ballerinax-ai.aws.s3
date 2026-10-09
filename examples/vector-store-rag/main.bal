@@ -17,12 +17,12 @@
 import ballerina/ai;
 import ballerina/io;
 import ballerinax/ai.aws.s3;
-import ballerinax/aws.s3 as awsS3;
+import ballerinax/aws;
 
 // Supplied via Config.toml — never hard-code credentials.
 configurable string accessKeyId = ?;
 configurable string secretAccessKey = ?;
-configurable awsS3:Region region = awsS3:US_EAST_1;
+configurable aws:Region region = aws:US_EAST_1;
 
 // S3 object storage: where the corpus is read from.
 configurable string bucket = ?;
