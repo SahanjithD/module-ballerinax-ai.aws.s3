@@ -592,3 +592,11 @@ isolated function testBackoffDelayIsJitteredWithinBounds() {
                 string `Attempt ${attempt}: delay ${delay} must lie within [${ceiling / 2d}, ${ceiling}]`);
     }
 }
+
+@test:Config {}
+isolated function testMetadataToChunkReturnsATextChunkForTextChunks() returns ai:Error? {
+    ai:Chunk chunk = check metadataToChunk({content: "hello", [CHUNK_TYPE_METADATA_KEY]: "text-chunk"}, "content");
+    test:assertTrue(chunk is ai:TextChunk, "A text chunk must come back as an ai:TextChunk");
+    ai:Chunk other = check metadataToChunk({content: "x", [CHUNK_TYPE_METADATA_KEY]: "custom"}, "content");
+    test:assertEquals(other.'type, "custom");
+}

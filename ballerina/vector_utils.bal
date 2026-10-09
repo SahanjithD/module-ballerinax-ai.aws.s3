@@ -316,6 +316,11 @@ isolated function metadataToChunk(map<json> metadata, string contentKey) returns
     string chunkType = typeValue is string ? typeValue : "text-chunk";
 
     ai:Metadata chunkMetadata = check createAiMetadata(remaining);
+    if chunkType == "text-chunk" {
+        // Built as `ai:TextChunk` so callers that type-test for it (model providers do) accept it.
+        ai:TextChunk textChunk = {content: contentValue, metadata: chunkMetadata};
+        return textChunk;
+    }
     return {'type: chunkType, content: contentValue, metadata: chunkMetadata};
 }
 
