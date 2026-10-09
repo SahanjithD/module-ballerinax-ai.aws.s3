@@ -20,3 +20,4 @@ jobs:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     with:
       repo-name: module-ballerinax-ai.aws.s3
+      publish-required: true

@@ -36,7 +36,6 @@ target
 *.ipr
 .m2
 .vscode/
-.cursor/
 .idea
 
 # Ignore ballerina files
@@ -53,9 +52,6 @@ build
 
 # Ignore Docker env file
 docker.env
-
-# Reference clones used during development (ai / sharepoint / aws.s3)
-_ref/
 
 # Example credentials
 examples/**/Config.toml

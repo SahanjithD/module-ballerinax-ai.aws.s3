@@ -7,6 +7,8 @@
 
 pluginManagement {
     plugins {
+        id "com.github.spotbugs-base" version "${spotbugsPluginVersion}"
+        id "de.undercouch.download" version "${downloadPluginVersion}"
         id "net.researchgate.release" version "${releasePluginVersion}"
         id "io.ballerina.plugin" version "${ballerinaGradlePluginVersion}"
     }
@@ -29,9 +31,11 @@ plugins {
 
 rootProject.name = 'module-ballerinax-ai.aws.s3'
 
+include ':checkstyle'
 include ':ai.aws.s3-native'
 include ':ai.aws.s3-ballerina'
 
+project(':checkstyle').projectDir = file("build-config${File.separator}checkstyle")
 project(':ai.aws.s3-native').projectDir = file("native")
 project(':ai.aws.s3-ballerina').projectDir = file("ballerina")
 
