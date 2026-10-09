@@ -33,9 +33,7 @@ prefix = "reports/"
 
 > `Config.toml` holds live credentials — it is gitignored by this repository. Do not commit it.
 
-`region` **must match the region the bucket was created in**. A mismatch fails with an opaque
-`PermanentRedirect` / `AuthorizationHeaderMalformed` error rather than anything helpful; the
-bucket's region is shown in the S3 console's Buckets list.
+Set `region` to the region the bucket is in; it is shown in the S3 console's Buckets list.
 
 ## Run the example
 
