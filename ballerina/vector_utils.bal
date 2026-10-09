@@ -19,8 +19,7 @@ import ballerina/lang.'decimal;
 import ballerina/time;
 import ballerina/uuid;
 
-// Metadata and vector limits from AWS's published S3 Vectors limitations. Kept as named
-// constants so every check that enforces one names it, rather than a magic number.
+// Limits from AWS's published S3 Vectors limitations.
 const int MAX_VECTOR_KEY_LENGTH = 1024;
 const int MAX_METADATA_KEYS = 50;
 // Applies to the names in an index's `nonFilterableMetadataKeys`, so it bounds `contentKey`.
@@ -31,40 +30,26 @@ const int MAX_PUT_BATCH_COUNT = 500;
 const int MAX_DELETE_BATCH_COUNT = 500;
 const int MAX_GET_BATCH_COUNT = 100;
 const int MAX_REQUEST_BYTES = 20 * 1024 * 1024;
-// Room left under `MAX_REQUEST_BYTES` for the request envelope around the vectors: the index
-// identifier, the array brackets and one comma per vector. 64 KiB covers a 500-vector batch with
-// a 2,048-character index ARN many times over.
+// Room under `MAX_REQUEST_BYTES` for the request envelope (index identifier, brackets, commas).
 const int REQUEST_ENVELOPE_HEADROOM_BYTES = 64 * 1024;
 const int MAX_PUT_PAYLOAD_BYTES = MAX_REQUEST_BYTES - REQUEST_ENVELOPE_HEADROOM_BYTES;
 const int MAX_TOP_K = 10000;
-// The smallest `topK` `queryByEmbedding` will ask S3 Vectors for, regardless of how few results
-// the caller wants. QueryVectors is an approximate search, and a small `topK` narrows how much of
-// the index it explores: measured against an index holding a single vector, queried with that
-// vector's own embedding, `topK: 1` came back empty on 6 of 10 attempts while `topK: 10` returned
-// it on 10 of 10 in the same period. Over-asking and truncating locally costs one response worth
-// of extra metadata and removes the misses.
+// Small `topK` values reduce recall in QueryVectors' approximate search, so at least this many
+// results are requested and the surplus is dropped.
 const int MIN_QUERY_TOP_K = 10;
 const int MAX_LIST_PAGE_SIZE = 1000;
 
-// The metadata key `add` writes the chunk's type under, so `query` can rebuild the `Chunk` with
-// its original type. Underscore-prefixed so it is unlikely to clash with a caller's own metadata;
-// `add` rejects a chunk whose metadata uses it (or the content key) rather than overwrite it.
+// Underscore-prefixed to stay clear of callers' own metadata; `add` rejects a clash anyway.
 const string CHUNK_TYPE_METADATA_KEY = "_chunkType";
 
-// Chunk types whose content is media, not text. Such a chunk can still carry a string (a URL),
-// which would otherwise pass the string-content check and be stored as if it were text.
+// Media chunks may carry a URL string, which would otherwise pass the string-content check.
 final readonly & string[] MEDIA_CHUNK_TYPES = ["image", "audio", "file", "binary"];
 
-// The `ai:Metadata` fields declared as `string`. Assigning a non-string to one of them panics, so
-// `createAiMetadata` checks these before copying a stored value across.
+// The `ai:Metadata` fields typed `string`; assigning anything else to them panics.
 final readonly & string[] STRING_METADATA_KEYS = ["mimeType", "fileName", "header", "language",
     "header1", "header2", "header3", "header4", "header5", "header6"];
 
-// ---------------------------------------------------------------------------------------------
-// Init-time validation
-// ---------------------------------------------------------------------------------------------
 
-// Checks that the index is named one way or the other, never both, and that no name is empty.
 isolated function validateVectorIndex(VectorIndex index) returns ai:Error? {
     string? indexArn = index.indexArn;
     string? vectorBucketName = index.vectorBucketName;
@@ -90,8 +75,7 @@ isolated function validateVectorIndex(VectorIndex index) returns ai:Error? {
     }
 }
 
-// Checks the store configuration, including the store-level filters, so a mistake surfaces at
-// `init` instead of on the first query.
+// Includes the store-level filters, so a bad one fails at `init`.
 isolated function validateStoreConfig(VectorStoreConfig config) returns ai:Error? {
     string contentKey = config.contentKey;
     if contentKey.trim() == "" {
@@ -116,27 +100,13 @@ isolated function validateStoreConfig(VectorStoreConfig config) returns ai:Error
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Entry -> wire mapping (`add`)
-// ---------------------------------------------------------------------------------------------
 
-// Converts one `ai:VectorEntry` into the JSON shape of a `PutInputVector`, validating everything
-// S3 Vectors would otherwise reject with an opaque error: dimension, key length, NaN/Infinity,
-// an all-zero vector under cosine, and every metadata limit. Every failure names the vector's
-// key so a caller adding a batch can tell which entry was the problem.
-//
-// `distanceMetric` is `()` when the store was initialized with `validateIndexOnInit: false` — the
-// all-zero-vector check below only fires when the metric is known to be "cosine", so an unknown
-// metric is treated as "don't guess" rather than assumed to be cosine.
-//
-// Assigns a UUID and mutates `entry.id` in place when the caller left it unset, so the caller
-// can see the generated id afterwards — the same contract `ai:InMemoryVectorStore` and the
-// Pinecone/Milvus stores follow.
+// Converts an entry to a `PutInputVector`, checking up front what S3 Vectors would reject with
+// an opaque error. Sets `entry.id` to a UUID when empty, as other `ai:VectorStore`s do.
 isolated function mapEntryToWireVector(ai:VectorEntry entry, string contentKey, int? expectedDimension,
         string? distanceMetric) returns map<json>|ai:Error {
     ai:Embedding embedding = entry.embedding;
     if embedding !is ai:Vector {
-        // S3 Vectors has no sparse or hybrid index type; only dense float vectors are stored.
         return error ai:Error("S3 Vectors supports dense vectors exclusively");
     }
 
@@ -177,10 +147,6 @@ isolated function mapEntryToWireVector(ai:VectorEntry entry, string contentKey, 
     }
     anydata content = entry.chunk.content;
     if content !is string {
-        // Every chunk kind other than text (image/audio/binary/file) carries non-string content,
-        // which has nowhere sensible to go in a JSON metadata map. This store is built around
-        // the `s3:TextDataLoader` -> chunker -> embedder -> vector store pipeline, so requiring
-        // string content is a deliberate scope limit, not an oversight.
         return error ai:Error(
             string `Vector '${key}': S3 Vectors vector store only supports chunks with string content`);
     }
@@ -219,8 +185,7 @@ isolated function mapEntryToWireVector(ai:VectorEntry entry, string contentKey, 
     return {key, "data": {"float32": embedding}, metadata};
 }
 
-// The metadata map with the content key removed — the subset S3 Vectors treats as filterable
-// and checks against the 2 KB limit, given this store declares only `contentKey` non-filterable.
+// Everything but the content key counts toward the 2 KB filterable limit.
 isolated function filterableMetadata(map<json> metadata, string contentKey) returns map<json> {
     map<json> result = metadata.clone();
     _ = result.removeIfHasKey(contentKey);
@@ -231,10 +196,7 @@ isolated function jsonByteSize(json value) returns int {
     return value.toJsonString().toBytes().length();
 }
 
-// Splits vectors into batches obeying both the 500-vector `PutVectors`/`DeleteVectors` count
-// limit and the 20 MiB request payload limit, whichever is hit first. A naive `chunk(500)` is
-// not enough: 500 high-dimensional vectors with near-maximal metadata can exceed 20 MiB well
-// before reaching the count limit.
+// Batches by both count and size, since 500 large vectors can exceed 20 MiB.
 isolated function batchBySize(map<json>[] vectors, int maxCount, int maxBytes) returns map<json>[][] {
     map<json>[][] batches = [];
     map<json>[] current = [];
@@ -255,9 +217,6 @@ isolated function batchBySize(map<json>[] vectors, int maxCount, int maxBytes) r
     return batches;
 }
 
-// Splits a flat list of vector keys into fixed-size batches, for `DeleteVectors` (500/call) and
-// `GetVectors` (100/call) — both are pure key lists with no accompanying payload large enough to
-// need `batchBySize`'s byte-aware accounting.
 isolated function chunkStrings(string[] items, int size) returns string[][] {
     string[][] chunks = [];
     int i = 0;
@@ -269,19 +228,9 @@ isolated function chunkStrings(string[] items, int size) returns string[][] {
     return chunks;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Metadata <-> `ai:Metadata`, including the epoch-seconds timestamp encoding
-// ---------------------------------------------------------------------------------------------
 
-// Flattens `ai:Metadata` into the wire's `map<json>`, encoding `createdAt`/`modifiedAt` as
-// epoch-seconds numbers rather than ISO-8601 strings.
-//
-// This is a deliberate divergence from `ai.pinecone`, which stores them as ISO-8601 strings.
-// S3 Vectors' `$gt`/`$gte`/`$lt`/`$lte` range operators only accept Number values (confirmed
-// against AWS's metadata-filtering documentation) — a string-encoded date would make equality
-// filters work but silently leave range filters non-functional. `createAiMetadata` below must
-// decode with the exact same encoding, or a filter built from a `time:Utc` value would never
-// match what was written.
+// Timestamps are stored as epoch seconds, unlike `ai.pinecone`'s ISO strings, because S3
+// Vectors' range operators only accept numbers.
 isolated function transformMetadata(ai:Metadata? metadata) returns map<json> {
     map<json> properties = {};
     if metadata is () {
@@ -298,9 +247,7 @@ isolated function transformMetadata(ai:Metadata? metadata) returns map<json> {
     return properties;
 }
 
-// The inverse of `transformMetadata`. `metadata` must already have the content and chunk-type
-// keys removed by the caller (`metadataToChunk` does this) — otherwise they would be duplicated
-// into `ai:Metadata`'s open fields alongside `Chunk.content`/`Chunk.'type`.
+// The caller removes the content and chunk-type keys first (`metadataToChunk` does).
 isolated function createAiMetadata(map<json> metadata) returns ai:Metadata|ai:Error {
     ai:Metadata result = {};
     foreach [string, json] [key, value] in metadata.entries() {
@@ -326,10 +273,7 @@ isolated function createAiMetadata(map<json> metadata) returns ai:Metadata|ai:Er
             }
             result[key] = value;
         } else if key == "index" || key == "id" || key == "prev" {
-            // These three ai:Metadata fields are declared `int`. A plain `result[key] = value`
-            // would panic with an uncaught InherentTypeViolation if the round-tripped JSON
-            // number decoded as a float (e.g. "5.0") rather than an int — coerce explicitly so
-            // a mismatch surfaces as this function's documented ai:Error instead of a panic.
+            // Declared `int` in `ai:Metadata`; a JSON round trip can turn 5 into 5.0.
             int|error intValue = value.cloneWithType(int);
             if intValue is error {
                 return error ai:Error(
@@ -353,11 +297,7 @@ isolated function epochSecondsToUtc(decimal epochSeconds) returns time:Utc {
     return [<int>wholeSeconds, fraction];
 }
 
-// Reconstructs a `Chunk` from a vector's wire metadata: `contentKey` becomes `content`, the
-// chunk-type key becomes `'type` (defaulting to `"text-chunk"` when absent — vectors written by
-// something other than this store's `add` may not carry it), and everything else becomes
-// `ai:Metadata`. `metadata` is consumed by value; the caller does not need to strip the content
-// or type keys first. A vector with no content is an error, which `query` turns into a skip.
+// A vector with no content is an error, which `query` turns into a skip.
 isolated function metadataToChunk(map<json> metadata, string contentKey) returns ai:Chunk|ai:Error {
     map<json> remaining = metadata.clone();
     json contentValue = remaining.removeIfHasKey(contentKey);
@@ -379,24 +319,10 @@ isolated function metadataToChunk(map<json> metadata, string contentKey) returns
     return {'type: chunkType, content: contentValue, metadata: chunkMetadata};
 }
 
-// ---------------------------------------------------------------------------------------------
-// Distance -> similarity score
-// ---------------------------------------------------------------------------------------------
 
-// Converts an S3 Vectors distance into an `ai:VectorMatch.similarityScore`, where — unlike a raw
-// distance — higher must mean more similar.
-//
-// * cosine: S3 returns cosine *distance*, which equals `1 - cosine similarity`. `1.0 - distance`
-//   recovers the true cosine similarity in `[-1, 1]`, matching the convention
-//   `ai:InMemoryVectorStore` uses via `vector:cosineSimilarity`.
-// * euclidean: `1.0 / (1.0 + distance)` maps `[0, infinity)` to `(0, 1]`, preserving rank order
-//   (smaller distance -> larger score). This deliberately does NOT match
-//   `ai:InMemoryVectorStore`, which returns the raw Euclidean distance as its "similarity" score
-//   for this metric — an inversion that makes its own ordering backwards. Rank-order correctness
-//   is treated as more important here than bit-for-bit consistency with that inversion.
-//
-// `distanceMetric` should be the metric reported by the response (`QueryVectorsResponse.
-// distanceMetric`) so a per-call value always wins over whatever was cached at `init`.
+// Higher must mean more similar. Cosine: `1 - distance`, the cosine similarity. Euclidean:
+// `1 / (1 + distance)`, which keeps rank order (unlike `ai:InMemoryVectorStore`, which returns
+// the raw distance).
 isolated function distanceToScore(float? distance, string distanceMetric) returns float {
     float d = distance ?: 0.0;
     if distanceMetric == "euclidean" {
@@ -405,12 +331,7 @@ isolated function distanceToScore(float? distance, string distanceMetric) return
     return 1.0 - d;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Metadata filter translation (`ai:MetadataFilters` -> S3 Vectors' Mongo-like filter JSON)
-// ---------------------------------------------------------------------------------------------
 
-// Merges the store-level `VectorStoreConfig.filters` with a per-query filter under `AND`. Either
-// side may be absent; `()` is returned only when both are.
 isolated function mergeFilters(ai:MetadataFilters? configFilters, ai:MetadataFilters? queryFilters)
         returns ai:MetadataFilters? {
     if configFilters is () {
@@ -422,11 +343,8 @@ isolated function mergeFilters(ai:MetadataFilters? configFilters, ai:MetadataFil
     return {condition: ai:AND, filters: [configFilters, queryFilters]};
 }
 
-// Translates `ai:MetadataFilters` into the JSON body S3 Vectors' `filter` parameter expects.
-// An empty filter list collapses to `{}` (the caller omits the field from the request entirely
-// rather than sending it), and a single filter is emitted bare, without a wrapping `$and` —
-// both to keep requests minimal and because a bare single-field object is exactly what S3
-// Vectors' own filter examples show for one condition.
+// An empty filter becomes `{}` (omitted from the request), and a single filter isn't wrapped in
+// `$and`.
 isolated function translateFilters(ai:MetadataFilters filters, string contentKey) returns map<json>|ai:Error {
     (ai:MetadataFilters|ai:MetadataFilter)[] rawFilters = filters.filters;
     if rawFilters.length() == 0 {
@@ -458,18 +376,15 @@ isolated function translateFilters(ai:MetadataFilters filters, string contentKey
 isolated function translateSingleFilter(ai:MetadataFilter filter, string contentKey) returns map<json>|ai:Error {
     json value = check validateFilter(filter, contentKey);
     if filter.operator == ai:EQUAL {
-        // S3 Vectors treats a bare `{key: value}` as an implicit `$eq`. `validateFilter` has already
-        // ruled out a map value, which would otherwise be read as an operator object.
+        // A bare `{key: value}` is an implicit `$eq`; map values are rejected by `validateFilter`.
         return {[filter.key]: value};
     }
     string s3Operator = check mapOperator(filter.operator);
     return {[filter.key]: {[s3Operator]: value}};
 }
 
-// Checks one filter against what S3 Vectors accepts and returns its value in wire form. A
-// `time:Utc` becomes epoch seconds, the encoding `add` uses for `createdAt`/`modifiedAt`, so a
-// date filter matches what was stored. The filter-only path runs every filter through here (via
-// `translateFilters`) before scanning, so both paths accept and reject exactly the same filters.
+// Validates a filter and returns its value in wire form (`time:Utc` becomes epoch seconds, as
+// stored). Both query paths go through here, so they accept the same filters.
 isolated function validateFilter(ai:MetadataFilter filter, string contentKey) returns json|ai:Error {
     if filter.key == contentKey {
         return error ai:Error(
@@ -519,7 +434,6 @@ isolated function validateFilter(ai:MetadataFilter filter, string contentKey) re
     return value;
 }
 
-// Converts a `time:Utc` filter value to epoch seconds; any other value is returned unchanged.
 isolated function toFilterOperand(json value) returns json {
     return value is time:Utc ? utcToEpochSeconds(value) : value;
 }
@@ -528,9 +442,8 @@ isolated function isScalar(json value) returns boolean {
     return value is string|boolean || toNumber(value) is float;
 }
 
-// Reads a JSON number as a `float`, or `()` for anything else. Numbers change type on the JSON
-// round trip (a Ballerina `0.5` float is read back as `0.5d`, a `2048d` as the int `2048`), and
-// Ballerina's `==` is type-sensitive, so numbers are always compared as floats.
+// Numbers change type on the JSON round trip (0.5 comes back as 0.5d) and `==` is
+// type-sensitive, so numbers are compared as floats.
 isolated function toNumber(json value) returns float? {
     if value is int {
         return <float>value;
@@ -576,29 +489,17 @@ isolated function mapOperator(ai:MetadataFilterOperator operator) returns string
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Local filter evaluation — needed because `ListVectors` supports no server-side filtering
-// (a still-open gap in the S3 Vectors API), so the filter-only `query` path and
-// `ai:VectorKnowledgeBase.deleteByFilter` must evaluate `ai:MetadataFilters` in Ballerina against
-// each vector's metadata after paging it in with `ListVectors`.
-//
-// The result must agree with what `QueryVectors` would match for the same filter, or
-// `deleteByFilter` deletes the wrong entries. So, as on the server: a missing key never matches,
-// numbers compare by value regardless of their Ballerina type, a range filter never matches a
-// non-numeric stored value, and a group with no conditions is dropped (as `translateFilters`
-// drops it from the request) rather than counted as a match. The filters themselves are validated
-// by `translateFilters` before the scan starts. `EQUAL` against an array-valued field matches if
-// any element is equal, as AWS documents for `$eq`; AWS documents no array semantics for the
-// other operators, so they compare the whole value.
-// ---------------------------------------------------------------------------------------------
+// Local filter evaluation for queries without an embedding (including `deleteByFilter`), since
+// `ListVectors` can't filter. It must match what `QueryVectors` would, so: a missing key never
+// matches, numbers compare by value, a range filter never matches a non-numeric value, empty groups
+// are dropped, and `EQUAL` matches any element of an array value, as AWS documents for `$eq`.
 
 isolated function matchesFilters(map<json> metadata, ai:MetadataFilters filters) returns boolean|ai:Error {
     boolean? result = check evaluateFilterGroup(metadata, filters);
-    // No conditions at all: nothing is sent to the server, so everything matches.
     return result ?: true;
 }
 
-// Returns `()` for a group with no conditions left once its own empty sub-groups are dropped.
+// `()` for a group left with no conditions.
 isolated function evaluateFilterGroup(map<json> metadata, ai:MetadataFilters group) returns boolean?|ai:Error {
     boolean[] results = [];
     foreach ai:MetadataFilters|ai:MetadataFilter node in group.filters {
@@ -635,7 +536,6 @@ isolated function compareMetadataValues(json left, ai:MetadataFilterOperator ope
         returns boolean|ai:Error {
     match operator {
         ai:EQUAL => {
-            // As on the server, `$eq` against an array-valued field matches if any element is equal.
             if left is json[] {
                 foreach json element in left {
                     if valuesEqual(element, right) {
@@ -663,7 +563,6 @@ isolated function compareMetadataValues(json left, ai:MetadataFilterOperator ope
             }
             float? leftNumber = toNumber(left);
             if leftNumber is () {
-                // The server never matches a range filter against a non-numeric stored value.
                 return false;
             }
             match operator {
@@ -696,8 +595,7 @@ isolated function valuesEqual(json left, json right) returns boolean {
     return left == right;
 }
 
-// Whether `candidates` (an `IN`/`NOT_IN` filter value) holds `value`. A malformed list is an
-// error, matching `validateFilter`, rather than a silent non-match.
+// A malformed list is an error, as in `validateFilter`.
 isolated function containsValue(ai:MetadataFilterOperator operator, json candidates, json value)
         returns boolean|ai:Error {
     if candidates !is json[] || candidates.length() == 0 {

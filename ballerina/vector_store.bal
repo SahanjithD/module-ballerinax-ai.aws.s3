@@ -20,11 +20,7 @@ import ballerina/log;
 import ballerinax/aws;
 import ballerinax/aws.auth;
 
-// S3 Vectors has no Ballerina connector, so this store calls the service directly over
-// `ballerina/http`, signing each request with SigV4 through `ballerinax/aws.auth`. Behaviour that
-// differs from other `ai:VectorStore` implementations (dense text chunks only, converted
-// similarity scores, filter-only queries scanning the index, idempotent delete) is documented in
-// the package README.
+// Behaviour that differs from other `ai:VectorStore` implementations is documented in the README.
 
 # A vector store backed by an Amazon S3 Vectors index.
 @display {
@@ -33,9 +29,7 @@ import ballerinax/aws.auth;
 public isolated class VectorStore {
     *ai:VectorStore;
 
-    // Every field is `final` and either an isolated object (`http:Client`,
-    // `auth:CredentialProvider`) or a readonly value, and nothing is mutated after `init`, so no
-    // `lock` blocks are needed anywhere in this class.
+    // All fields are final and isolated or readonly, so no locks are needed.
     private final http:Client httpClient;
     private final auth:CredentialProvider credentialProvider;
     private final string host;
@@ -46,9 +40,7 @@ public isolated class VectorStore {
     private final QueryMode? queryMode;
     private final boolean returnVectorData;
     private final int maxListScan;
-    // `()` when `validateIndexOnInit` is `false`. The dimension check on `add` is then skipped
-    // rather than guessed at, and the all-zero-vector check (cosine only) is skipped too, since
-    // assuming "cosine" would wrongly reject a legitimate all-zero vector on a euclidean index.
+    // `()` when `validateIndexOnInit` is false; the checks that need them are then skipped.
     private final int? dimension;
     private final string? distanceMetric;
 
@@ -134,9 +126,7 @@ public isolated class VectorStore {
     # + entries - The vectors to add, each carrying a text chunk
     # + return - An `ai:Error` if an entry is invalid or a request fails
     public isolated function add(ai:VectorEntry[] entries) returns ai:Error? {
-        // `PutVectors` is an upsert. Batches stay within its 500-vector and 20 MiB limits, and there
-        // is no cross-batch transaction: if a later batch fails, earlier ones are already committed.
-        // `entry.id` is set in place when it was empty, so the caller can see the generated id.
+        // `PutVectors` is an upsert, and there is no transaction across batches.
         if entries.length() == 0 {
             return;
         }
@@ -170,12 +160,8 @@ public isolated class VectorStore {
     # + query - The embedding, filters and number of results to return
     # + return - The matches, most similar first, or an `ai:Error` if the query is invalid or fails
     public isolated function query(ai:VectorStoreQuery query) returns ai:VectorMatch[]|ai:Error {
-        // With an embedding, this runs `QueryVectors`. Without one (a filter-only query, or the
-        // shape `deleteByFilter` issues) `QueryVectors` cannot be used, so the index is paged with
-        // `ListVectors` and filters are evaluated locally, bounded by `maxListScan`; those matches
-        // get `similarityScore: 0.0`, as in `ai:InMemoryVectorStore`. Store-level filters are
-        // combined with the query's under `AND`. `topK: -1` means all matches (capped at
-        // `MAX_TOP_K` with an embedding). Embeddings are `[]` unless `returnVectorData` is set.
+        // Without an embedding `QueryVectors` can't be used, so the index is scanned with
+        // `ListVectors` and filtered locally; those matches score 0.0, as in `ai:InMemoryVectorStore`.
         int topK = query.topK;
         if topK == 0 {
             return error ai:Error(
@@ -193,8 +179,7 @@ public isolated class VectorStore {
 
         ai:VectorMatch[]|ai:Error result;
         if embedding is () {
-            // -1 means "all" here too, but unlike the QueryVectors path there is no fixed
-            // ceiling to cap it at — only `maxListScan` bounds how far this scans.
+            // No fixed ceiling here; `maxListScan` bounds the scan.
             result = self.queryByFilterOnly(filters, topK);
         } else if embedding !is ai:Vector {
             return error ai:Error("S3 Vectors supports dense vectors exclusively");
@@ -205,21 +190,14 @@ public isolated class VectorStore {
         if result is ai:Error {
             return result;
         }
-        // The filter-only path already asked `ListVectors` for vector data.
         if self.returnVectorData && embedding !is () {
             check self.hydrateEmbeddings(result);
         }
         return result;
     }
 
-    // Runs an approximate nearest-neighbour search, paginating on `nextToken` until `topK`
-    // results are collected or the response reports no further page. Every page re-sends the
-    // same query vector, requested `topK`, and filter, per S3 Vectors' pagination contract for
-    // this operation.
-    //
-    // The value sent to the service is floored at `MIN_QUERY_TOP_K` because QueryVectors' recall
-    // degrades sharply at very small `topK` (see the constant); the caller's own `topK` still
-    // bounds what this returns, so the surplus is discarded locally.
+    // Asks for at least `MIN_QUERY_TOP_K` results, since recall drops at very small `topK`, and
+    // trims to the caller's `topK`.
     private isolated function queryByEmbedding(ai:Vector embedding, ai:MetadataFilters? filters, int topK)
             returns ai:VectorMatch[]|ai:Error {
         json filterJson = ();
@@ -234,8 +212,6 @@ public isolated class VectorStore {
 
         ai:VectorMatch[] matches = [];
         string? nextToken = ();
-        // Ballerina has no post-condition loop, so this pages via an unconditional `while true`
-        // that breaks once a response reports no further `nextToken`.
         while true {
             QueryVectorsResponse page = check queryVectors(self.httpClient, self.credentialProvider, self.host,
                     self.region, self.index, queryVectorJson, requestedTopK, filterJson, self.queryMode, nextToken);
@@ -243,9 +219,7 @@ public isolated class VectorStore {
             foreach QueryOutputVector item in page.vectors {
                 ai:Chunk|ai:Error chunk = metadataToChunk(item.metadata ?: {}, self.contentKey);
                 if chunk is ai:Error {
-                    // A vector with unreadable content metadata (e.g. written by something
-                    // other than this store's `add`) must not sink the whole query for every
-                    // other, well-formed match — skip it and keep going.
+                    // Skip a vector this store didn't write rather than fail the whole query.
                     log:printWarn(string `S3 Vectors: skipping vector '${item.key}' in query results: ` +
                             chunk.message());
                     continue;
@@ -269,16 +243,11 @@ public isolated class VectorStore {
         return matches;
     }
 
-    // Pages through the whole index with `ListVectors`, evaluating `filters` locally against
-    // each vector's metadata since S3 Vectors cannot filter server-side without a query vector.
-    // `topK < 0` collects every match up to `maxListScan`; `topK > 0` stops as soon as that many
-    // matches are found (but still counts every vector *scanned*, matched or not, against
-    // `maxListScan`).
+    // Scans the index, filtering locally; every vector scanned counts toward `maxListScan`.
     private isolated function queryByFilterOnly(ai:MetadataFilters? filters, int topK)
             returns ai:VectorMatch[]|ai:Error {
         if filters is ai:MetadataFilters {
-            // Validate once up front with the same rules the `QueryVectors` path applies, so a bad
-            // filter fails the same way on both paths, even against an empty index.
+            // Same validation as the `QueryVectors` path, even when the index is empty.
             _ = check translateFilters(filters, self.contentKey);
         }
         log:printDebug("S3 Vectors: running a filter-only query; scanning the index with ListVectors",
@@ -323,16 +292,10 @@ public isolated class VectorStore {
         return matches;
     }
 
-    // Hydrates `ai:VectorMatch.embedding` via batched `GetVectors` calls (100 keys/call), only
-    // called when `VectorStoreConfig.returnVectorData` is enabled. Mutates the matches in place
-    // rather than rebuilding them, since they are freshly constructed (not readonly) here.
     private isolated function hydrateEmbeddings(ai:VectorMatch[] matches) returns ai:Error? {
         if matches.length() == 0 {
             return;
         }
-        // Index matches by id once (O(matches)) rather than rescanning the whole `matches` array
-        // for every 100-key GetVectors batch — at topK near S3 Vectors' 10,000 ceiling that
-        // rescan would be ~100 batches x 10,000 matches, a million comparisons for one query.
         map<int> matchIndexById = {};
         string[] keys = [];
         foreach int i in 0 ..< matches.length() {
@@ -372,8 +335,7 @@ public isolated class VectorStore {
     # + ids - The id, or ids, of the vectors to delete
     # + return - An `ai:Error` if a request fails
     public isolated function delete(string|string[] ids) returns ai:Error? {
-        // `DeleteVectors` is idempotent, unlike `ai:InMemoryVectorStore`, which errors on a missing
-        // id. Batches hold at most 500 keys, with no cross-batch transaction.
+        // Idempotent, unlike `ai:InMemoryVectorStore`, which errors on a missing id.
         string[] keys = (ids is string) ? [ids] : ids;
         if keys.length() == 0 {
             return;

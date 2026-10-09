@@ -22,21 +22,15 @@ import ballerina/time;
 import ballerinax/aws;
 import ballerinax/aws.auth;
 
-// Pure unit tests for `vector_utils.bal` and the endpoint resolution in `s3_vectors_api.bal`:
-// no network access, no credentials, safe to run in CI. Filter translation/evaluation have their
-// own file (`vector_filter_test.bal`); this one covers everything else — endpoint resolution,
-// distance-to-score conversion, metadata round-tripping, entry validation, and batching.
+// Tests for `vector_utils.bal` and endpoint resolution; filters are in `vector_filter_test.bal`.
 
 // Endpoint resolution ignores credentials entirely, but `auth` is a required field on
 // `VectorStoreConnectionConfig`, so these tests supply a placeholder that is never used to sign.
 final readonly & auth:StaticAuthConfig TEST_AUTH = {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"};
 
 // ---------------------------------------------------------------------------
-// Endpoint resolution — the canary for the riskiest assumption in this module (see
-// `resolveServiceEndpoint` in `s3_vectors_api.bal`): `s3vectors` is absent from the SDK's
-// bundled endpoint metadata, so an unqualified lookup silently resolves to a host that does not
-// exist. If this test ever fails, every other test in this file is testing against a store that
-// cannot actually reach AWS.
+// Endpoint resolution: `s3vectors` isn't in the SDK's endpoint metadata, so an unqualified lookup
+// would resolve to a host that doesn't exist.
 // ---------------------------------------------------------------------------
 
 @test:Config {}
@@ -93,10 +87,8 @@ isolated function testResolveServiceEndpointHonoursServiceUrlOverride() {
 }
 
 // ---------------------------------------------------------------------------
-// SigV4 header shape. `vector_mock_service.bal` deliberately does not verify signatures — it
-// would just be re-testing `ballerinax/aws.auth` itself — so this is the one place that checks
-// `invoke` (`s3_vectors_api.bal`) is actually calling `auth:getSignedHeaders` with a shape that
-// produces a usable signature, against a fixed request and static credentials.
+// SigV4 header shape. The mock service doesn't verify signatures, so this checks `invoke`'s call
+// to `auth:getSignedHeaders` against a fixed request.
 // ---------------------------------------------------------------------------
 
 @test:Config {}
@@ -224,9 +216,7 @@ isolated function testCreateAiMetadataCoercesFileSizeToDecimal() returns ai:Erro
 
 @test:Config {}
 isolated function testCreateAiMetadataCoercesIntTypedFields() returns ai:Error? {
-    // index/id/prev are declared `int` on ai:Metadata. A plain pass-through assignment for
-    // these (rather than an explicit coercion) panics at runtime when the decoded JSON number
-    // is a float (e.g. round-tripped through a JSON layer as "5.0") instead of erroring cleanly.
+    // Declared `int` on ai:Metadata; a float from the JSON round trip must not panic.
     ai:Metadata metadata = check createAiMetadata({index: 5, id: 7, prev: 3});
     test:assertEquals(metadata["index"], 5);
     test:assertEquals(metadata["id"], 7);
@@ -396,9 +386,7 @@ isolated function testMapEntryToWireVectorAllowsAllZeroUnderEuclidean() returns 
 
 @test:Config {}
 isolated function testMapEntryToWireVectorAllowsAllZeroWhenDistanceMetricIsUnknown() returns ai:Error? {
-    // `distanceMetric` is `()` when `VectorStoreConfig.validateIndexOnInit` is `false` — the
-    // all-zero check must not assume "cosine" in that case, or a legitimate all-zero embedding
-    // would be wrongly rejected against a real euclidean index.
+    // With the metric unknown, a legitimate all-zero embedding must not be rejected as cosine.
     ai:VectorEntry entry = textEntry([0.0, 0.0, 0.0], id = "zero-3");
     map<json> _ = check mapEntryToWireVector(entry, "content", 3, ());
 }
@@ -544,9 +532,7 @@ isolated function testBatchBySizeRespectsByteBoundary() {
 
 @test:Config {}
 isolated function testBatchBySizeSingleOversizedVectorGetsOwnBatch() {
-    // A single vector larger than the byte budget must not be dropped or fail — it becomes its
-    // own batch, on the theory that the request-level limit will surface the problem clearly if
-    // it is truly too large, rather than the batching logic looping forever trying to shrink it.
+    // An oversized vector gets its own batch; the request limit then reports it.
     map<json>[] vectors = [tinyVector("solo")];
     map<json>[][] batches = batchBySize(vectors, 500, 1);
     test:assertEquals(batches.length(), 1);

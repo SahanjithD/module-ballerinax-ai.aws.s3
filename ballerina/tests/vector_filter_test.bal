@@ -18,12 +18,8 @@ import ballerina/ai;
 import ballerina/test;
 import ballerina/time;
 
-// Pure unit tests for the two halves of metadata filtering in `vector_utils.bal`:
-// `translateFilters` (server-side, sent to `QueryVectors`) and `matchesFilters` (local
-// evaluation, used for the filter-only `query`/`deleteByFilter` path). Every operator and
-// nesting shape is tested against both, on shared fixtures, since the two must agree — a
-// filter-only query must return the same set `QueryVectors` would for an equivalent filter, or
-// `deleteByFilter` silently deletes the wrong entries.
+// Tests for `translateFilters` (sent to `QueryVectors`) and `matchesFilters` (local evaluation),
+// which must agree or `deleteByFilter` deletes the wrong entries.
 
 const string CONTENT_KEY = "content";
 
@@ -152,7 +148,7 @@ isolated function testTranslateFiltersRejectsStringForRangeOperator() {
 }
 
 // ---------------------------------------------------------------------------
-// matchesFilters — local evaluation, mirroring ballerina/ai's own entryMatchesFilters semantics
+// matchesFilters
 // ---------------------------------------------------------------------------
 
 @test:Config {}
@@ -291,11 +287,7 @@ isolated function testTranslateFiltersRejectsNonScalarValues() {
 
 @test:Config {}
 isolated function testMatchesFiltersRejectsNonArrayInValue() {
-    // translateSingleFilter rejects a non-array $in/$nin value client-side (see
-    // testTranslateFiltersRejectsNonArrayForIn); local evaluation must reject the same malformed
-    // input too, rather than silently treating it as "matches nothing" — otherwise a
-    // filter-only query or deleteByFilter would quietly no-op on a caller mistake that the
-    // equivalent QueryVectors path would reject loudly.
+    // Rejected, as `translateFilters` rejects it, rather than silently matching nothing.
     boolean|ai:Error result = matchesFilters({genre: "comedy"}, {filters: [filter("genre", ai:IN, "comedy")]});
     test:assertTrue(result is ai:Error, "A non-array IN filter value must be rejected, not silently non-matched");
 }
@@ -307,9 +299,7 @@ isolated function testMatchesFiltersRejectsEmptyInArray() {
 }
 
 // ---------------------------------------------------------------------------
-// Agreement between translateFilters and matchesFilters on the same fixtures — this is the
-// property that keeps a server-side-filtered QueryVectors and a local-filtered ListVectors scan
-// returning the same results for the same filter.
+// Agreement between translateFilters and matchesFilters
 // ---------------------------------------------------------------------------
 
 type AgreementCase record {|
@@ -376,12 +366,8 @@ isolated function testTranslationAndEvaluationAgree() returns ai:Error? {
     ];
 
     foreach AgreementCase testCase in cases {
-        // The server-side path: translate the filter (proving it doesn't error) — the actual
-        // agreement being tested is between what QueryVectors WOULD return for this metadata
-        // against the translated filter, and what the local evaluator decides for the same pair.
-        // Since there is no live index to query against, the local evaluator is asserted to
-        // agree with the documented S3 Vectors filter semantics directly, and `translateFilters`
-        // is asserted to succeed producing a well-formed filter for the same input.
+        // There's no live index here, so check the local result against AWS's documented
+        // semantics and that the same filter translates cleanly.
         map<json> _ = check translateFilters(testCase.filters, CONTENT_KEY);
         boolean localResult = check matchesFilters(testCase.metadata, testCase.filters);
         test:assertEquals(localResult, testCase.expectedMatch,

@@ -18,9 +18,7 @@ import ballerina/ai;
 import ballerina/test;
 import ballerinax/aws.s3;
 
-// `load()` policy paths, driven offline through a mocked `s3:Client` (see `paging_test.bal` for
-// the harness): whole-bucket sources, named keys, the missing-key fallback, the skip branches of a
-// prefix walk, and bucket error mapping.
+// `load()` policy paths, driven through a mocked `s3:Client`.
 
 isolated function metadataOf(string key, int contentLength, s3:StorageClass storageClass = s3:STANDARD)
         returns s3:ObjectMetadata => {

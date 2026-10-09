@@ -18,11 +18,7 @@ import ballerina/ai;
 import ballerina/test;
 import ballerinax/aws.auth;
 
-// End-to-end `VectorStore` tests, driven against the in-process mock service in
-// `vector_mock_service.bal` rather than a live S3 Vectors endpoint (none exists to test
-// against — see that file's header comment). These exercise the store's actual request
-// building, batching, pagination, and response/error mapping; `vector_mapping_test.bal` and
-// `vector_filter_test.bal` cover the pure logic beneath them in isolation.
+// `VectorStore` tests against the in-process mock in `vector_mock_service.bal`.
 
 const string MOCK_SERVICE_URL = "http://localhost:20990";
 const string TEST_VECTOR_BUCKET = "test-vector-bucket";
@@ -130,9 +126,7 @@ function testInitFailsWhenContentKeyIsFilterable() returns error? {
 
 @test:Config {}
 isolated function testVectorStoreInitAcceptsDefaultCredentialsConfigShape() {
-    // The default AWS credential chain must be accepted as a configuration shape without
-    // panicking, matching the loader's own test for this — actual resolution only happens on
-    // the first signed request, not at construction time.
+    // Credentials resolve on the first request, so the default chain must be accepted at init.
     VectorStore|ai:Error store = new (
         {auth: auth:DEFAULT_CREDENTIALS, region: "us-east-1", endpoint: {customEndpoint: MOCK_SERVICE_URL}},
         {vectorBucketName: TEST_VECTOR_BUCKET, indexName: TEST_INDEX},
@@ -172,9 +166,7 @@ function testAddSendsExpectedPutVectorsBody() returns error? {
 
 @test:Config {}
 function testAddAllowsAllZeroVectorWhenValidationDisabled() returns error? {
-    // With `validateIndexOnInit: false` (`newTestStore`'s default), the store never learns the
-    // index's real distance metric, so it must not guess "cosine" and wrongly reject a
-    // legitimate all-zero embedding against what might actually be a euclidean index.
+    // With the metric unknown, a legitimate all-zero embedding must not be rejected.
     VectorStore store = check newTestStore();
     ai:VectorEntry entry = textEntry([0.0, 0.0, 0.0], "hello world", "zero-vec");
     check store.add([entry]);
@@ -572,9 +564,7 @@ function testDeleteSurfacesBatchProgressOnFailure() returns error? {
     foreach int i in 0 ..< 750 {
         ids.push("vec-" + i.toString());
     }
-    // First batch (500 keys) succeeds with the mock's default 200 {}; the second fails with a
-    // non-retryable status, so it fails on the first attempt rather than falling through to the
-    // mock's default 200 {} on a later retry attempt.
+    // The first batch succeeds; the second fails with a non-retryable status on its first attempt.
     mockS3VectorsControl.queueResponse("DeleteVectors", {statusCode: 200, body: {}});
     mockS3VectorsControl.queueResponse("DeleteVectors",
             {statusCode: 403, headers: {"x-amzn-errortype": "AccessDeniedException"},

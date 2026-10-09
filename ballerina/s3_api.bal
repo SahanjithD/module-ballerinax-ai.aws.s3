@@ -17,44 +17,27 @@
 import ballerina/ai;
 import ballerinax/aws.s3;
 
-// Everything that touches `ballerinax/aws.s3` lives here, so the loader deals in normalized
-// values and the connector's quirks are absorbed in one place.
+// Everything that touches `ballerinax/aws.s3` lives here, so the loader deals in normalized values.
 
-// A normalized S3 listing entry — the subset of an object's metadata the loader uses. The
-// connector's `s3:S3Object` fields are carried through here rather than being handled
-// throughout the loader. In `aws.s3` 4.0.0 `size` is a required `int` and `eTag`/`lastModified`
-// are required strings, so `size` is used directly; the string fields are still parsed
-// defensively when metadata is built (a blank/unparseable timestamp is omitted rather than
-// failing the load).
+// The subset of an object's metadata the loader uses.
 type S3Item record {|
-    // The full object key, including any '/' separators.
     string key;
-    // The object size in bytes as reported by S3.
     int size = 0;
-    // The object's entity tag, with S3's surrounding double quotes stripped.
+    // Without S3's surrounding double quotes.
     string eTag = "";
-    // The last-modified timestamp as reported by S3 (ISO-8601).
     string lastModified = "";
-    // The object's storage class as reported by the listing. Objects in an archived class
-    // (GLACIER/DEEP_ARCHIVE) require a RestoreObject before they can be read, so the loader
-    // skips or rejects them by this field rather than failing on a GetObject error.
     s3:StorageClass storageClass = s3:STANDARD;
-    // The object's Content-Type. Known only for a key resolved with HEAD; listings carry none.
+    // Known only for a key resolved with HEAD; listings carry none.
     string? contentType = ();
 |};
 
-// One page of an S3 object listing.
 type S3Page record {|
-    // The objects on this page.
     S3Item[] items;
-    // Whether more objects exist beyond this page.
     boolean truncated;
-    // The token to fetch the next page, as returned by S3 (`NextContinuationToken`). Present only
-    // when `truncated` is true; the caller passes it back to continue the listing.
+    // S3's `NextContinuationToken`, present while `truncated` is true.
     string? continuationToken;
 |};
 
-// Builds the S3 client the loader reads through, from the connector's own configuration.
 isolated function buildS3Client(s3:ConnectionConfig config) returns s3:Client|ai:Error {
     s3:Client|error s3Client = new s3:Client(config);
     if s3Client is error {
@@ -63,18 +46,10 @@ isolated function buildS3Client(s3:ConnectionConfig config) returns s3:Client|ai
     return s3Client;
 }
 
-// Lists one page of objects under a prefix, normalizing the connector's result.
-//
-// The connector's `listObjects` is a single ListObjectsV2 call — it does not paginate; the caller
-// (`loadPrefix`) drives paging with the `continuationToken`. `()` for `continuationToken` requests
-// the first page; the `NextContinuationToken` from a truncated page is passed back for the next.
-// `delimiter` ("/" for a non-recursive walk) makes S3 return only same-level keys in `objects`.
-// The one `s3:S3Object` field that needs normalizing is the ETag, whose surrounding double quotes
-// are stripped here rather than in the loader.
+// Lists one page of objects. `listObjects` makes a single ListObjectsV2 call, so the caller drives
+// paging with `continuationToken`.
 isolated function listObjectPage(s3:Client s3Client, string bucket, string? prefix, string? delimiter,
         string? continuationToken, int maxKeys) returns S3Page|ai:Error {
-    // Build the config incrementally: each field of `s3:ListObjectsConfig` is optional, so an
-    // absent value is simply left unset rather than passed as `()`.
     s3:ListObjectsConfig config = {maxKeys};
     if prefix is string {
         config.prefix = prefix;
@@ -85,12 +60,8 @@ isolated function listObjectPage(s3:Client s3Client, string bucket, string? pref
     if continuationToken is string {
         config.continuationToken = continuationToken;
     }
-    // Passed positionally. `listObjects` takes an included record parameter
-    // (`*ListObjectsConfig`), and on Ballerina 2201.12 a rest-argument spread against one —
-    // `listObjects(bucket, ...[config])` — compiles cleanly but delivers an empty record to
-    // the callee, silently dropping prefix/delimiter/continuationToken. That turned every
-    // call into an unfiltered whole-bucket listing whose paging never terminated, because
-    // each response carried a fresh continuation token. Do not reintroduce the spread form.
+    // Pass the config positionally: on 2201.12 a rest spread (`...[config]`) into the included
+    // record parameter compiles but delivers an empty record.
     s3:ListObjectsResponse|s3:Error listing = s3Client->listObjects(bucket, config);
     if listing is s3:NoSuchBucketError {
         return error ai:Error(
@@ -112,8 +83,6 @@ isolated function listObjectPage(s3:Client s3Client, string bucket, string? pref
         items.push({
             key,
             size: obj.size,
-            // S3 returns the ETag wrapped in literal double quotes (it is an HTTP entity-tag).
-            // Strip them so the metadata value compares against the bare hex digest callers have.
             eTag: unquote(obj.eTag),
             lastModified: obj.lastModified,
             storageClass: obj.storageClass
@@ -122,10 +91,7 @@ isolated function listObjectPage(s3:Client s3Client, string bucket, string? pref
     return {items, truncated: listing.isTruncated, continuationToken: listing?.nextContinuationToken};
 }
 
-// Opens a byte stream over an object's content. The caller drains and closes the stream.
-//
-// `aws.s3` 4.0.0 has no dedicated `getObjectAsStream`; streaming is done through `getObject` with
-// a `stream<byte[], error?>` target type, inferred here from the assignment.
+// Opens a byte stream over an object's content; the caller drains and closes it.
 isolated function openObjectStream(s3:Client s3Client, string bucket, string key)
         returns stream<byte[], error?>|ai:Error {
     stream<byte[], error?>|error objStream = s3Client->getObject(bucket, key);
@@ -143,17 +109,9 @@ isolated function openObjectStream(s3:Client s3Client, string bucket, string key
     return objStream;
 }
 
-// Resolves an exact object with a HEAD request (no body download): returns a normalized item if
-// the object exists, `()` if it does not, or an `ai:Error` on a transport failure. Uses HEAD
-// rather than a ListObjectsV2 probe because HEAD is order-independent (so it also works on
-// directory buckets, whose listings are not lexicographically ordered) and needs only
-// `s3:GetObject` on the key rather than `s3:ListBucket` on the bucket.
-//
-// "Missing" is read off the connector's `s3:NoSuchKeyError` rather than from a preceding
-// `doesObjectExist` probe, which would double the round trips for every explicitly named key.
-// A key the caller cannot read rather than one that is absent still surfaces as a failure: S3
-// answers HEAD with 403 when the caller lacks permission, which the connector maps to the base
-// `s3:Error`, not to `NoSuchKeyError`.
+// Resolves a key with HEAD, returning `()` if it doesn't exist. HEAD needs only `s3:GetObject`
+// and, unlike a listing probe, works on directory buckets, whose listings are unordered. A 403
+// maps to the base `s3:Error`, so a key the caller can't read still fails rather than looking absent.
 isolated function headObject(s3:Client s3Client, string bucket, string key) returns S3Item?|ai:Error {
     s3:ObjectMetadata|s3:Error metadata = s3Client->getObjectMetadata(bucket, key);
     if metadata is s3:NoSuchKeyError {
@@ -173,24 +131,18 @@ isolated function headObject(s3:Client s3Client, string bucket, string key) retu
     };
 }
 
-// Whether an object's storage class requires a RestoreObject before it can be read. GLACIER
-// and DEEP_ARCHIVE are asynchronous-retrieval tiers, so GetObject on them returns
-// InvalidObjectState; GLACIER_IR and INTELLIGENT_TIERING retrieve synchronously and stay
-// loadable. The loader decides by this field (authoritative in the listing) rather than by
-// probing GetObject and inspecting the error.
+// GLACIER and DEEP_ARCHIVE objects need a RestoreObject before GetObject can read them.
 isolated function isArchivedStorageClass(s3:StorageClass storageClass) returns boolean {
     return storageClass == s3:GLACIER || storageClass == s3:DEEP_ARCHIVE;
 }
 
-// Whether an error is a per-object failure that a prefix walk may skip rather than abort the
-// whole load (undecodable text, a failed extraction, an object deleted after listing), as opposed
-// to a fatal error such as an auth or connectivity failure. Signalled by a `recoverableInWalk` flag on the error's detail.
+// Whether an error affects only one object (so a prefix walk can skip it), as flagged by
+// `recoverableInWalk` on the error detail.
 isolated function isRecoverableInWalk(error e) returns boolean {
     var flag = e.detail()["recoverableInWalk"];
     return flag is boolean && flag;
 }
 
-// Strips a single pair of surrounding double quotes, as S3 wraps ETag values in them.
 isolated function unquote(string value) returns string {
     if value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"") {
         return value.substring(1, value.length() - 1);

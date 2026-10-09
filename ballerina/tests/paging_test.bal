@@ -18,17 +18,8 @@ import ballerina/ai;
 import ballerina/test;
 import ballerinax/aws.s3;
 
-// The prefix-walk paging loop, driven offline against a mocked `s3:Client`.
-//
-// `TextDataLoader.init` accepts `ConnectionConfig|s3:Client`, and `s3:Client` is a public client
-// class, so a default mock substitutes for it with no network. That matters: this loop is where
-// both of the loader's serious defects have lived, and neither was reachable by any other test —
-// a live walk of a small prefix completes in one page and never executes the paging branches at
-// all. Everything here runs in milliseconds; the equivalent live test needs a 1001-key bucket and
-// several minutes.
-//
-// What these tests cannot see: the connector's native layer is replaced wholesale, so they prove
-// how the loader *reacts* to a response shape, never that S3 or the connector *produces* it.
+// The prefix-walk paging loop, driven against a mocked `s3:Client`. These test how the loader
+// reacts to a response, not what S3 or the connector actually sends.
 
 const string PAGING_BUCKET = "paging-test-bucket";
 
@@ -94,17 +85,10 @@ isolated function documentsOf(ai:Document[]|ai:Document loaded) returns ai:Docum
     loaded is ai:Document[] ? loaded : [loaded];
 
 // ---------------------------------------------------------------------------
-// M1 — the arguments actually put on the wire
+// The arguments sent to listObjects
 // ---------------------------------------------------------------------------
 
-// Pins the exact `ListObjectsConfig` the loader sends, on both the first request and the
-// continuation. This is the direct regression guard for the defect that made every prefix walk an
-// unfiltered whole-bucket listing that paged forever: the config reached `listObjects` empty, so
-// `prefix`, `delimiter` and `continuationToken` never went to S3. `withArguments` fails the mock
-// if anything but these records arrives, so a silent argument loss cannot pass here.
-//
-// It cannot prove the connector then transmits them — that defect lived below this seam and needs
-// the live multi-page walk to close.
+// Pins the exact `ListObjectsConfig` sent on the first request and the continuation.
 @test:Config {}
 function testPrefixAndTokenAreSentToListObjects() returns error? {
     s3:Client mockClient = test:mock(s3:Client);
@@ -141,12 +125,10 @@ function testRecursiveWalkSendsNoDelimiter() returns error? {
 }
 
 // ---------------------------------------------------------------------------
-// M2 — paging crosses the page boundary
+// Paging across the page boundary
 // ---------------------------------------------------------------------------
 
-// A full 1000-key page followed by a 1-key page must yield 1001 documents. A result of exactly
-// 1000 would mean the second page was dropped — the regression the live `expensive` test exists to
-// catch, reproduced here in milliseconds instead of ~6 minutes and 1001 seeded objects.
+// A full 1000-key page followed by a 1-key page must yield 1001 documents.
 @test:Config {}
 function testPagingCrossesThePageBoundary() returns error? {
     s3:Client mockClient = test:mock(s3:Client);
@@ -162,10 +144,8 @@ function testPagingCrossesThePageBoundary() returns error? {
             "A >1000-key prefix must be paged through completely, not truncated at one page");
 }
 
-// A page carrying no objects but reporting more results is legitimate: with a delimiter, S3 counts
-// CommonPrefixes against the same 1000-entry budget, and the connector does not surface them, so
-// a folder-heavy prefix genuinely returns object-less pages. The walk must continue rather than
-// stop early or fail.
+// With a delimiter, sub-folders use up the page budget without appearing as objects, so
+// object-less truncated pages are legitimate and the walk must continue.
 @test:Config {}
 function testObjectLessTruncatedPagesDoNotStopTheWalk() returns error? {
     s3:Client mockClient = test:mock(s3:Client);
@@ -184,13 +164,10 @@ function testObjectLessTruncatedPagesDoNotStopTheWalk() returns error? {
 }
 
 // ---------------------------------------------------------------------------
-// M3 — the loop always terminates
+// The loop always terminates
 // ---------------------------------------------------------------------------
 
-// A listing that re-serves the same page forever must be caught, not looped on. This is the exact
-// shape of the original defect: every request returned page one, each with a *fresh* continuation
-// token, so a token comparison could never detect it. Object keys are unique within a listing, so
-// the repeat is what gives it away.
+// A listing that re-serves the same page with fresh tokens is caught by the repeated last key.
 @test:Config {}
 function testRepeatedPageIsDetected() {
     s3:Client mockClient = test:mock(s3:Client);
@@ -231,9 +208,7 @@ function testTruncatedPageWithoutTokenFails() {
     }
 }
 
-// A stuck listing that *repeats* a continuation token on object-less pages cannot be caught by the
-// key-based check (an empty page offers no key to compare). The seen-token guard rejects it as soon
-// as a token is returned a second time — immediately, rather than only at the page ceiling.
+// Empty pages that repeat a continuation token are caught by the seen-token guard.
 @test:Config {}
 function testRepeatedContinuationTokenIsRejected() {
     s3:Client mockClient = test:mock(s3:Client);
@@ -251,10 +226,7 @@ function testRepeatedContinuationTokenIsRejected() {
     }
 }
 
-// The case no key-based or token check can see: object-less pages that report more results forever,
-// each with a *fresh* token (so the seen-token guard never fires) — the legitimate folder-heavy
-// walk shape. The page ceiling is what bounds this, and it is what makes the loop terminate for
-// *any* response sequence. Removing the ceiling makes this test hang.
+// Empty pages with fresh tokens forever: only the page ceiling stops this.
 @test:Config {}
 function testEndlessFreshTokenPagesHitTheCeiling() {
     s3:Client mockClient = test:mock(s3:Client, new FreshTokenListClient());
@@ -291,19 +263,11 @@ isolated client class FreshTokenListClient {
 
 
 // ---------------------------------------------------------------------------
-// M4 — a key ending in '/' that actually carries content
+// A key ending in '/' that carries content
 // ---------------------------------------------------------------------------
 
-// Nothing in S3 forbids an object whose key ends in `/` from holding content, but the walk dropped
-// any such key on the suffix alone. The placeholder filter runs above the per-object paths, so that
-// object disappeared without even the warning every other skip logs. Only a zero-byte marker is a
-// folder placeholder; one with content must reach the classification path instead.
-//
-// Asserted on `includeInPrefixWalk` directly, because the distinction is not visible in the
-// returned documents: `baseName("p/realdir/")` is `""`, so such a key has no extension, classifies
-// as `UNSUPPORTED`, and is skipped either way. What the fix changes is that the skip is now logged
-// like every other one rather than being silent — and that a future content-type-based
-// classification would see the object at all.
+// Only a zero-byte key ending in '/' is a folder placeholder; one with content must reach the
+// per-object path, where its skip is logged.
 @test:Config {}
 function testTrailingSlashKeyIsSkippedOnlyWhenEmpty() {
     test:assertFalse(includeInPrefixWalk(itemOf("p/marker/", 0), "p/", true, ()),
@@ -314,13 +278,10 @@ function testTrailingSlashKeyIsSkippedOnlyWhenEmpty() {
 
 
 // ---------------------------------------------------------------------------
-// M5 — an extensionless folder marker must not shadow the folder
+// An extensionless folder marker must not shadow the folder
 // ---------------------------------------------------------------------------
 
-// `aws s3api put-object --key reports` and several Hadoop/S3A configurations create a zero-byte
-// object keyed exactly `reports`, alongside the real objects under `reports/`. Resolving the path
-// as an exact key found that marker, classified it as an unsupported type, and failed the entire
-// load — a total failure on a legitimate bucket layout. The marker must fall through to the walk.
+// Some tools create a zero-byte `reports` object next to `reports/`; the path must walk the folder.
 @test:Config {}
 function testZeroByteMarkerFallsThroughToPrefixWalk() returns error? {
     s3:Client mockClient = test:mock(s3:Client);
@@ -368,9 +329,7 @@ function testNamedUnsupportedKeyWithContentStillFails() {
     }
 }
 
-// The marker fallthrough must not swallow a real empty object. `photo.png` at zero bytes is a
-// marker candidate by size, but names no folder, so the walk finds nothing — and returning an
-// empty array there would hide from the caller that the key they named is unloadable.
+// A zero-byte unsupported key that names no folder must still fail, not return nothing.
 @test:Config {}
 function testEmptyUnsupportedNamedKeyStillFails() {
     s3:Client mockClient = test:mock(s3:Client);

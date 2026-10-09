@@ -16,11 +16,7 @@
 
 import ballerina/test;
 
-// Tests for the production seam over `ballerinax/aws.s3`. These deliberately make no network
-// calls. `listObjectPage` and `openObjectStream` both issue live requests through the connector
-// (a single signed ListObjectsV2/GetObject call each; the prefix walk does its own continuation-
-// token paging), so they are exercised by the integration suite rather than here; `unquote` is a
-// pure normalization that can be asserted directly.
+// Tests for the pure helpers over `ballerinax/aws.s3`; no network calls.
 
 // ---------------------------------------------------------------------------
 // ETag normalization
