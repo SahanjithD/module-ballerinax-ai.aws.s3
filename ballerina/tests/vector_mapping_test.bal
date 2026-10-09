@@ -15,6 +15,7 @@
 // under the License.
 
 import ballerina/ai;
+import ballerina/http;
 import ballerina/lang.'float as floats;
 import ballerina/test;
 import ballerina/time;
@@ -256,7 +257,8 @@ isolated function testCreateAiMetadataRejectsNonNumericTimestamp() {
 
 @test:Config {}
 isolated function testMetadataToChunkStripsContentAndTypeKeys() returns ai:Error? {
-    ai:Chunk chunk = check metadataToChunk({content: "hello world", 'type: "text-chunk", header: "H1"}, "content");
+    ai:Chunk chunk = check metadataToChunk({content: "hello world", [CHUNK_TYPE_METADATA_KEY]: "text-chunk",
+        header: "H1"}, "content");
     test:assertEquals(chunk.content, "hello world");
     test:assertEquals(chunk.'type, "text-chunk");
     ai:Metadata? metadata = chunk.metadata;
@@ -264,7 +266,7 @@ isolated function testMetadataToChunkStripsContentAndTypeKeys() returns ai:Error
     if metadata is ai:Metadata {
         test:assertEquals(metadata.hasKey("content"), false,
                 "The content key must not be duplicated into ai:Metadata's open fields");
-        test:assertEquals(metadata.hasKey("type"), false,
+        test:assertEquals(metadata.hasKey(CHUNK_TYPE_METADATA_KEY), false,
                 "The chunk-type key must not be duplicated into ai:Metadata's open fields");
         test:assertEquals(metadata["header"], "H1");
     }
@@ -277,9 +279,10 @@ isolated function testMetadataToChunkDefaultsTypeWhenAbsent() returns ai:Error? 
 }
 
 @test:Config {}
-isolated function testMetadataToChunkDefaultsContentToEmptyStringWhenAbsent() returns ai:Error? {
-    ai:Chunk chunk = check metadataToChunk({header: "H1"}, "content");
-    test:assertEquals(chunk.content, "", "A vector with no content key must not fail the whole query");
+isolated function testMetadataToChunkRejectsMissingContent() {
+    // `query` turns this error into a logged skip, so one foreign vector cannot fail the query.
+    ai:Chunk|ai:Error result = metadataToChunk({header: "H1"}, "content");
+    test:assertTrue(result is ai:Error, "A vector with no content key must not become an empty chunk");
 }
 
 @test:Config {}
@@ -393,7 +396,7 @@ isolated function testMapEntryToWireVectorAllowsAllZeroUnderEuclidean() returns 
 
 @test:Config {}
 isolated function testMapEntryToWireVectorAllowsAllZeroWhenDistanceMetricIsUnknown() returns ai:Error? {
-    // `distanceMetric` is `()` when `Configuration.validateIndexOnInit` is `false` — the
+    // `distanceMetric` is `()` when `VectorStoreConfig.validateIndexOnInit` is `false` — the
     // all-zero check must not assume "cosine" in that case, or a legitimate all-zero embedding
     // would be wrongly rejected against a real euclidean index.
     ai:VectorEntry entry = textEntry([0.0, 0.0, 0.0], id = "zero-3");
@@ -424,7 +427,9 @@ isolated function repeatChar(string ch, int count) returns string {
 }
 
 @test:Config {}
-isolated function testMapEntryToWireVectorRejectsLongMetadataKeyName() {
+isolated function testMapEntryToWireVectorAcceptsLongFilterableMetadataKeyName() {
+    // The 63-character limit applies to non-filterable key names (so to `contentKey`), not to
+    // ordinary filterable metadata keys.
     string longKey = repeatChar("k", 70);
     ai:VectorEntry entry = {
         id: "long-key",
@@ -432,7 +437,55 @@ isolated function testMapEntryToWireVectorRejectsLongMetadataKeyName() {
         chunk: {'type: "text-chunk", content: "hello", metadata: {[longKey]: "value"}}
     };
     map<json>|ai:Error result = mapEntryToWireVector(entry, "content", (), "cosine");
-    test:assertTrue(result is ai:Error, "A metadata key name over 63 characters must be rejected client-side");
+    test:assertFalse(result is ai:Error, "A long filterable metadata key name must not be rejected client-side");
+}
+
+@test:Config {}
+isolated function testMapEntryToWireVectorRejectsReservedMetadataKeys() {
+    foreach string reservedKey in ["content", CHUNK_TYPE_METADATA_KEY] {
+        ai:VectorEntry entry = {
+            id: "reserved",
+            embedding: [0.1, 0.2],
+            chunk: {'type: "text-chunk", content: "hello", metadata: {[reservedKey]: "user value"}}
+        };
+        map<json>|ai:Error result = mapEntryToWireVector(entry, "content", (), "cosine");
+        test:assertTrue(result is ai:Error,
+                string `User metadata named '${reservedKey}' must be rejected, not overwritten`);
+    }
+}
+
+@test:Config {}
+isolated function testUserTypeMetadataSurvivesRoundTrip() returns ai:Error? {
+    ai:VectorEntry entry = {
+        id: "typed",
+        embedding: [0.1, 0.2],
+        chunk: {'type: "text-chunk", content: "summary", metadata: {"type": "invoice"}}
+    };
+    map<json> wireVector = check mapEntryToWireVector(entry, "content", (), "cosine");
+    map<json> metadata = <map<json>>wireVector["metadata"];
+    ai:Chunk chunk = check metadataToChunk(metadata, "content");
+    test:assertEquals(chunk.content, "summary");
+    test:assertEquals(chunk.'type, "text-chunk");
+    test:assertEquals((chunk.metadata ?: {})["type"], "invoice",
+            "A user metadata field named 'type' must round-trip unchanged");
+}
+
+@test:Config {}
+isolated function testMapEntryToWireVectorRejectsMediaChunkWithUrlContent() {
+    ai:VectorEntry entry = {
+        id: "image-url",
+        embedding: [0.1, 0.2],
+        chunk: {'type: "image", content: "https://example.com/cat.png"}
+    };
+    map<json>|ai:Error result = mapEntryToWireVector(entry, "content", (), "cosine");
+    test:assertTrue(result is ai:Error, "A media chunk must be rejected even when its content is a URL string");
+}
+
+@test:Config {}
+isolated function testMetadataToChunkRejectsNonStringTypedField() {
+    ai:Chunk|ai:Error result = metadataToChunk({content: "hello", mimeType: 42}, "content");
+    test:assertTrue(result is ai:Error,
+            "A non-string value under a string-typed ai:Metadata field must be an error, not a panic");
 }
 
 @test:Config {}
@@ -498,4 +551,58 @@ isolated function testBatchBySizeSingleOversizedVectorGetsOwnBatch() {
     map<json>[][] batches = batchBySize(vectors, 500, 1);
     test:assertEquals(batches.length(), 1);
     test:assertEquals(batches[0].length(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Init-time validation and HTTP client configuration
+// ---------------------------------------------------------------------------
+
+@test:Config {}
+isolated function testValidateStoreConfigRejectsBadValues() {
+    VectorStoreConfig[] badConfigs = [
+        {contentKey: ""},
+        {contentKey: CHUNK_TYPE_METADATA_KEY},
+        {contentKey: repeatChar("c", 64)},
+        {maxListScan: 0},
+        {filters: {filters: [{key: "content", operator: ai:EQUAL, value: "x"}]}}
+    ];
+    foreach VectorStoreConfig config in badConfigs {
+        test:assertTrue(validateStoreConfig(config) is ai:Error,
+                string `Invalid store configuration must be rejected: ${config.toString()}`);
+    }
+    test:assertEquals(validateStoreConfig({}), (), "The default configuration must be valid");
+}
+
+@test:Config {}
+isolated function testValidateVectorIndexRejectsEmptyNames() {
+    VectorIndex[] badIndexes = [
+        {vectorBucketName: "", indexName: "idx"},
+        {vectorBucketName: "bucket", indexName: " "},
+        {indexArn: ""},
+        {},
+        {indexArn: "arn:aws:s3vectors:us-east-1:123456789012:bucket/b/index/i", indexName: "i"}
+    ];
+    foreach VectorIndex index in badIndexes {
+        test:assertTrue(validateVectorIndex(index) is ai:Error,
+                string `Invalid index identifier must be rejected: ${index.toString()}`);
+    }
+}
+
+@test:Config {}
+isolated function testClientConfigurationPinsTransportSettings() {
+    http:ClientConfiguration config = toClientConfiguration({timeout: 12});
+    test:assertEquals(config.httpVersion, http:HTTP_1_1);
+    test:assertEquals(config.http1Settings.chunking, http:CHUNKING_NEVER);
+    test:assertEquals(config.retryConfig, ());
+    test:assertEquals(config.timeout, 12d);
+}
+
+@test:Config {}
+isolated function testBackoffDelayIsJitteredWithinBounds() {
+    foreach int attempt in 1 ... 5 {
+        decimal ceiling = backoffCeiling(attempt);
+        decimal delay = backoffDelay(attempt);
+        test:assertTrue(delay >= ceiling / 2d && delay <= ceiling,
+                string `Attempt ${attempt}: delay ${delay} must lie within [${ceiling / 2d}, ${ceiling}]`);
+    }
 }

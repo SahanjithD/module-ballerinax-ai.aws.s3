@@ -28,7 +28,7 @@ const string MOCK_SERVICE_URL = "http://localhost:20990";
 const string TEST_VECTOR_BUCKET = "test-vector-bucket";
 const string TEST_INDEX = "test-index";
 
-function newTestStore(Configuration config = {validateIndexOnInit: false}) returns VectorStore|ai:Error {
+function newTestStore(VectorStoreConfig config = {validateIndexOnInit: false}) returns VectorStore|ai:Error {
     mockS3VectorsControl.reset();
     return new (
         {
@@ -717,4 +717,156 @@ function testRetryableStatusIsRetriedAndSucceeds() returns error? {
     ai:Error? result = store.add([textEntry([0.1, 0.2], "x", "vec-1")]);
     test:assertFalse(result is ai:Error, "A 503 followed by a 200 must succeed after an internal retry");
     test:assertEquals(mockS3VectorsControl.callCount("PutVectors"), 2, "Exactly one retry attempt must have occurred");
+}
+
+@test:Config {}
+function testCloseReleasesTheStore() returns error? {
+    VectorStore store = check newTestStore();
+    check store.close();
+}
+
+@test:Config {}
+function testThrottlingIsRetriedAndSucceeds() returns error? {
+    VectorStore store = check newTestStore();
+    mockS3VectorsControl.queueResponse("DeleteVectors",
+            {statusCode: 429, headers: {"x-amzn-errortype": "TooManyRequestsException"}, body: {message: "slow down"}});
+
+    check store.delete("vec-1");
+    test:assertEquals(mockS3VectorsControl.callCount("DeleteVectors"), 2, "A 429 must be retried once and then succeed");
+}
+
+@test:Config {}
+function testPersistentRetryableStatusFailsAfterMaxAttempts() returns error? {
+    VectorStore store = check newTestStore();
+    foreach int _ in 1 ... MAX_ATTEMPTS {
+        mockS3VectorsControl.queueResponse("PutVectors",
+                {statusCode: 503, headers: {"x-amzn-errortype": "ServiceUnavailableException"}, body: {message: "busy"}});
+    }
+
+    ai:Error? result = store.add([textEntry([0.1, 0.2], "x", "vec-1")]);
+    test:assertTrue(result is ai:Error, "A 503 on every attempt must fail");
+    test:assertEquals(mockS3VectorsControl.callCount("PutVectors"), MAX_ATTEMPTS,
+            "The request must be attempted exactly MAX_ATTEMPTS times");
+    if result is ai:Error {
+        test:assertEquals(result.detail()["httpStatusCode"], 503);
+    }
+}
+
+@test:Config {}
+function testNonRetryableStatusIsNotRetried() returns error? {
+    VectorStore store = check newTestStore();
+    mockS3VectorsControl.queueResponse("PutVectors",
+            {statusCode: 400, headers: {"x-amzn-errortype": "ValidationException"}, body: {message: "bad"}});
+
+    ai:Error? result = store.add([textEntry([0.1, 0.2], "x", "vec-1")]);
+    test:assertTrue(result is ai:Error);
+    test:assertEquals(mockS3VectorsControl.callCount("PutVectors"), 1, "A 400 must not be retried");
+}
+
+@test:Config {}
+function testEuclideanDistancesAreConvertedToScoresInQuery() returns error? {
+    VectorStore store = check newTestStore();
+    mockS3VectorsControl.queueResponse("QueryVectors", {
+        body: {
+            distanceMetric: "euclidean",
+            vectors: [
+                {key: "near", distance: 0.0, metadata: {content: "a"}},
+                {key: "far", distance: 3.0, metadata: {content: "b"}}
+            ]
+        }
+    });
+
+    ai:VectorMatch[] matches = check store.query({embedding: [0.1, 0.2], topK: 2});
+    test:assertEquals(matches.length(), 2);
+    test:assertEquals(matches[0].similarityScore, 1.0, "Zero Euclidean distance must score 1.0");
+    test:assertEquals(matches[1].similarityScore, 0.25, "Distance 3 must score 1 / (1 + 3)");
+    test:assertTrue(matches[0].similarityScore > matches[1].similarityScore,
+            "A nearer vector must score higher, so rank order is preserved");
+}
+
+@test:Config {}
+function testFilterOnlyQueryReadsEmbeddingsFromListVectors() returns error? {
+    VectorStore store = check newTestStore({validateIndexOnInit: false, returnVectorData: true});
+    mockS3VectorsControl.queueResponse("ListVectors", {
+        body: {vectors: [{key: "vec-1", data: {float32: [0.1, 0.2]}, metadata: {content: "a"}}]}
+    });
+
+    ai:VectorMatch[] matches = check store.query({topK: -1});
+    test:assertEquals(matches.length(), 1);
+    test:assertEquals(matches[0].embedding, [0.1, 0.2],
+            "The filter-only path must take embeddings from ListVectors' returnData");
+    test:assertEquals(mockS3VectorsControl.callCount("GetVectors"), 0,
+            "The filter-only path must not make follow-up GetVectors calls");
+    json[] requests = mockS3VectorsControl.requestsFor("ListVectors");
+    test:assertEquals(check requests[0].returnData, true);
+}
+
+@test:Config {}
+function testFilterOnlyQueryRejectsInvalidFilterOnEmptyIndex() returns error? {
+    VectorStore store = check newTestStore();
+    ai:VectorMatch[]|ai:Error result = store.query({
+        topK: -1,
+        filters: {filters: [{key: "genre", operator: ai:EQUAL, value: {"$ne": "comedy"}}]}
+    });
+    test:assertTrue(result is ai:Error,
+            "An invalid filter must be rejected on the filter-only path even when nothing would be scanned");
+    test:assertEquals(mockS3VectorsControl.callCount("ListVectors"), 0);
+}
+
+@test:Config {}
+function testRequestsTargetTheIndexArnWhenGiven() returns error? {
+    mockS3VectorsControl.reset();
+    string indexArn = "arn:aws:s3vectors:us-east-1:123456789012:bucket/b/index/i";
+    VectorStore store = check new (
+        {
+            auth: {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"},
+            region: "us-east-1",
+            endpoint: {customEndpoint: MOCK_SERVICE_URL}
+        },
+        {indexArn},
+        {validateIndexOnInit: false}
+    );
+    check store.delete("vec-1");
+    json[] requests = mockS3VectorsControl.requestsFor("DeleteVectors");
+    map<json> body = <map<json>>requests[0];
+    test:assertEquals(body["indexArn"], indexArn);
+    test:assertFalse(body.hasKey("vectorBucketName") || body.hasKey("indexName"),
+            "An ARN-addressed request must not also carry the bucket and index names");
+}
+
+@test:Config {}
+function testLargeRequestIsSignedAndSentOverHttp11WithContentLength() returns error? {
+    // A 4096-dimension vector is past Ballerina's CHUNKING_AUTO threshold; S3 Vectors rejects both
+    // chunked bodies and HTTP/2, so this guards the transport settings `init` pins.
+    VectorStore store = check newTestStore();
+    float[] embedding = [];
+    foreach int i in 0 ..< 4096 {
+        embedding.push(0.001 * <float>(i + 1));
+    }
+    check store.add([{id: "big", embedding, chunk: {'type: "text-chunk", content: "hello"}}]);
+
+    CapturedTransport[] transports = mockS3VectorsControl.transportsFor("PutVectors");
+    test:assertEquals(transports.length(), 1);
+    CapturedTransport transport = transports[0];
+    test:assertEquals(transport.httpVersion, "1.1");
+    test:assertTrue(transport.contentLength is string, "The request must carry a Content-Length");
+    test:assertEquals(transport.transferEncoding, (), "The request body must not be chunked");
+    test:assertTrue((transport.authorization ?: "").startsWith("AWS4-HMAC-SHA256 "),
+            "The request must carry a SigV4 Authorization header");
+    test:assertTrue(transport.amzDate is string, "The request must carry X-Amz-Date");
+}
+
+@test:Config {}
+function testQueryModeIsSentOnlyWhenSet() returns error? {
+    VectorStore defaultStore = check newTestStore();
+    mockS3VectorsControl.queueResponse("QueryVectors", {body: {distanceMetric: "cosine", vectors: []}});
+    _ = check defaultStore.query({embedding: [0.1, 0.2], topK: 1});
+    map<json> defaultBody = <map<json>>mockS3VectorsControl.requestsFor("QueryVectors")[0];
+    test:assertFalse(defaultBody.hasKey("queryMode"), "Without queryMode the index's own mode must apply");
+
+    VectorStore enhancedStore = check newTestStore({validateIndexOnInit: false, queryMode: ENHANCED});
+    mockS3VectorsControl.queueResponse("QueryVectors", {body: {distanceMetric: "cosine", vectors: []}});
+    _ = check enhancedStore.query({embedding: [0.1, 0.2], topK: 1});
+    map<json> enhancedBody = <map<json>>mockS3VectorsControl.requestsFor("QueryVectors")[0];
+    test:assertEquals(enhancedBody["queryMode"], "ENHANCED");
 }
