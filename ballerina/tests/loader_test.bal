@@ -82,10 +82,14 @@ isolated function testInitAcceptsDefaultCredentialsConfigShape() {
     // credentials this must surface as a clean ai:Error, never a panic.
     TextDataLoader|ai:Error loader =
         new ({auth: auth:DEFAULT_CREDENTIALS, region: "us-east-1"}, [{bucket: TEST_BUCKET}]);
-    if loader is ai:Error {
-        test:assertTrue(loader.message().startsWith("Failed to initialize the AWS S3 client:"),
-                "A credential-chain failure must be wrapped, got: " + loader.message());
-    }
+    test:assertTrue(loader is TextDataLoader || loader.message().startsWith("Failed to initialize the AWS S3 client:"),
+            "The chain must either build a loader or fail with a wrapped error");
+}
+
+@test:Config {}
+isolated function testInitRejectsEmptyPaths() {
+    TextDataLoader|ai:Error loader = new (testConnection(), [{bucket: TEST_BUCKET, paths: []}]);
+    test:assertTrue(loader is ai:Error, "An empty paths list must be rejected rather than load nothing");
 }
 
 // ---------------------------------------------------------------------------
@@ -235,13 +239,11 @@ isolated function testStripUtf8BomOnlyRemovesTheBom() {
 @test:Config {}
 isolated function testUtf8BomIsStrippedFromDecodedContent() returns error? {
     // A UTF-8 BOM prepended to real content must vanish from the decoded text, while every
-    // content byte survives verbatim. The log line makes the before/after visible in the run.
+    // content byte survives verbatim.
     byte[] withBom = [0xEF, 0xBB, 0xBF];
     withBom.push(..."# Title".toBytes());
     ai:TextDocument doc = check buildDocument(withBom, TEST_BUCKET, "docs/bom.md", 10, "", "").ensureType();
     string content = contentOf(doc);
-    io:println(string `[BOM test] input bytes=${withBom.length()} (${withBom.toString()}), ` +
-            string `decoded content=${content.toJsonString()} (${content.length()} chars)`);
     test:assertEquals(content, "# Title", "The content must be preserved exactly, only the BOM removed");
     test:assertFalse(content.startsWith("\u{FEFF}"), "No leading U+FEFF may remain");
     test:assertEquals(content.length(), 7, "The 3 BOM bytes are gone; the 7 content characters remain");
@@ -258,8 +260,6 @@ isolated function testUtf8BomIsStrippedAcrossTextTypes(string key, string body) 
     withBom.push(...body.toBytes());
     ai:TextDocument doc = check buildDocument(withBom, TEST_BUCKET, key, 10, "", "").ensureType();
     string content = contentOf(doc);
-    io:println(string `[BOM test] key=${key}: input ${withBom.length()} bytes -> ` +
-            string `content=${content.toJsonString()} (${content.length()} chars)`);
     test:assertEquals(content, body, key + ": content must survive verbatim, only the BOM removed");
     test:assertFalse(content.startsWith("\u{FEFF}"), key + ": no leading U+FEFF may remain");
 }

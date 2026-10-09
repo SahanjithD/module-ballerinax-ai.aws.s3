@@ -42,17 +42,18 @@ enum DocumentKind {
 }
 
 // Builds an `ai:TextDocument` from an object's downloaded bytes: natively-textual content is
-// decoded directly, `pdf` is extracted with Tika, and `docx`/`pptx` with POI. Returns `()` when
+// decoded directly, `pdf` is extracted with Tika, and `docx`/`pptx`/`xlsx` with POI. Returns `()` when
 // the object cannot be represented as text (unsupported Office, images, unknown binary),
 // signalling the caller to skip or reject it. `size` is the byte count S3 reported; `lastModified`
 // is parsed defensively — a blank or unparseable timestamp is omitted rather than failing the load.
 isolated function buildDocument(byte[] content, string bucket, string key, int size,
-        string lastModified, string eTag) returns ai:TextDocument?|ai:Error {
+        string lastModified, string eTag, string? contentType = ()) returns ai:TextDocument?|ai:Error {
     ai:Metadata metadata = {fileName: baseName(key)};
-    // A clean, parameter-free MIME type derived from the key extension. `ai`'s
-    // `guessChunker` matches `text/markdown`/`text/html` *exactly*, so a `; charset=...`
-    // suffix (which S3's Content-Type often carries) must never reach it.
-    string? mimeType = mimeTypeForExtension(getExtension(key));
+    // A clean, parameter-free MIME type derived from the key extension, or from the object's
+    // Content-Type when the extension is unknown. `ai`'s `guessChunker` matches
+    // `text/markdown`/`text/html` *exactly*, so a `; charset=...` suffix (which S3's Content-Type
+    // often carries) must never reach it.
+    string? mimeType = mimeTypeForExtension(getExtension(key)) ?: bareMimeType(contentType);
     if mimeType is string {
         metadata.mimeType = mimeType;
     }
@@ -69,7 +70,7 @@ isolated function buildDocument(byte[] content, string bucket, string key, int s
         metadata["eTag"] = eTag;
     }
 
-    match classify(key, ()) {
+    match classifyObject(key, contentType) {
         PLAIN_TEXT => {
             string|error text = string:fromBytes(stripUtf8Bom(content));
             if text is error {
@@ -85,38 +86,41 @@ isolated function buildDocument(byte[] content, string bucket, string key, int s
         PDF => {
             string|error text = extractPdfText(content, key);
             if text is error {
-                return error ai:Error(
-                    string `Failed to extract text from '${key}' in bucket '${bucket}': ${text.message()}`, text);
+                return extractionError(bucket, key, text);
             }
             return {content: text, metadata};
         }
         DOCX => {
             string|error text = extractDocxText(content, key);
             if text is error {
-                return error ai:Error(
-                    string `Failed to extract text from '${key}' in bucket '${bucket}': ${text.message()}`, text);
+                return extractionError(bucket, key, text);
             }
             return {content: text, metadata};
         }
         PPTX => {
             string|error text = extractPptxText(content, key);
             if text is error {
-                return error ai:Error(
-                    string `Failed to extract text from '${key}' in bucket '${bucket}': ${text.message()}`, text);
+                return extractionError(bucket, key, text);
             }
             return {content: text, metadata};
         }
         XLSX => {
             string|error text = extractXlsxText(content, key);
             if text is error {
-                return error ai:Error(
-                    string `Failed to extract text from '${key}' in bucket '${bucket}': ${text.message()}`, text);
+                return extractionError(bucket, key, text);
             }
             return {content: text, metadata};
         }
     }
     return ();
 }
+
+// A failed PDF or Office extraction is a problem with that one object (corrupt, encrypted, or past
+// a POI safety limit), so it is tagged recoverable: a prefix walk skips it with a warning, while a
+// named key still returns the error.
+isolated function extractionError(string bucket, string key, error cause) returns ai:Error =>
+    error ai:Error(string `Failed to extract text from '${key}' in bucket '${bucket}': ${cause.message()}`,
+            cause, recoverableInWalk = true);
 
 // Extracts plain text from a PDF document using Apache Tika's PDFParser, reading directly
 // from the in-memory bytes (no temporary file). `fileName` is passed as a Tika resource-name
@@ -153,6 +157,29 @@ isolated function extractXlsxText(byte[] content, string fileName) returns strin
     'class: "io.ballerina.lib.ai.aws.s3.TextExtractor",
     name: "extractXlsxText"
 } external;
+
+// Classifies an object by its key extension, falling back to its Content-Type only when the
+// extension says nothing (e.g. an extensionless key). The extension wins otherwise, because S3
+// Content-Types are frequently generic or wrong (`binary/octet-stream`, a `.md` sent as
+// `text/plain`), while the extension is what the uploader named the file.
+isolated function classifyObject(string key, string? contentType) returns DocumentKind {
+    DocumentKind kind = classify(key, ());
+    if kind == UNSUPPORTED && contentType is string {
+        return classify(key, contentType);
+    }
+    return kind;
+}
+
+// A Content-Type with its parameters (`; charset=...`) removed and lowercased, or `()` when
+// absent, blank, or the generic binary type that says nothing about the content.
+isolated function bareMimeType(string? contentType) returns string? {
+    if contentType is () {
+        return ();
+    }
+    int? semicolon = contentType.indexOf(";");
+    string mime = (semicolon is int ? contentType.substring(0, semicolon) : contentType).trim().toLowerAscii();
+    return mime == "" || mime == "application/octet-stream" || mime == "binary/octet-stream" ? () : mime;
+}
 
 // Classifies an object by how its text is obtained, using MIME type (when known) then the
 // key extension. S3 object listings carry no Content-Type, so in practice classification is
@@ -235,8 +262,10 @@ isolated function drainStream(stream<byte[], error?> objStream, int maxBytes, st
         total += next.value.length();
         if total > maxBytes {
             closeQuietly(objStream);
+            // The listed size was under the limit but the content is not, so this is still a
+            // per-object problem a prefix walk can skip.
             return error ai:Error(string `Object '${key}' in bucket '${bucket}' exceeds the configured ` +
-                string `maximum size of ${maxBytes} bytes and was not read into memory.`);
+                string `maximum size of ${maxBytes} bytes and was not read into memory.`, recoverableInWalk = true);
         }
         content.push(...next.value);
     }
@@ -338,10 +367,11 @@ final readonly & string[] TEXT_MIME_TYPES = [
 ];
 
 // Key extensions treated as natively textual (decoded directly, matching `ai`'s handling of
-// md/html/htm plus the natively-textual types S3 buckets hold constantly).
+// md/html/htm plus the natively-textual types S3 buckets hold constantly). `ts` is left out on
+// purpose: in S3 it is far more often an MPEG transport-stream video segment than TypeScript.
 final readonly & string[] TEXT_EXTENSIONS = [
     "txt", "text", "md", "markdown", "csv", "tsv", "json", "xml", "html", "htm",
-    "yaml", "yml", "log", "ini", "conf", "properties", "css", "js", "ts"
+    "yaml", "yml", "log", "ini", "conf", "properties", "css", "js"
 ];
 
 // The Word (.docx) OOXML media type; extracted via POI's XWPFWordExtractor.
@@ -384,7 +414,6 @@ final readonly & map<string> MIME_TYPES_BY_EXTENSION = {
     "yml": "application/yaml",
     "css": "text/css",
     "js": "text/javascript",
-    "ts": "application/typescript",
     "pdf": "application/pdf",
     "docx": DOCX_MIME_TYPE,
     "pptx": PPTX_MIME_TYPE,

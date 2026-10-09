@@ -15,14 +15,14 @@
 // under the License.
 
 import ballerina/io;
+import ballerina/test;
 
 // Shared test helpers.
 //
-// The loader reads through a concrete `s3:Client`, which cannot be substituted or redirected
-// (the connector hardcodes the AWS endpoint), so `TextDataLoader.load()` itself is only
-// exercised by integration testing against real S3. What the unit suite covers instead is every
-// decision the loader delegates to a module-private function: classification, the prefix-walk
-// filters, document construction and metadata mapping, and stream draining.
+// `paging_test.bal` drives `TextDataLoader.load()` through a mocked `s3:Client`. The rest of the
+// unit suite tests the decisions the loader delegates to module-private functions:
+// classification, the prefix-walk filters, document construction and metadata mapping, and
+// stream draining.
 
 const string TEST_BUCKET = "test-bucket";
 
@@ -84,4 +84,23 @@ isolated class TestByteIterator {
             return self.closed;
         }
     }
+}
+
+@test:Config {}
+isolated function testClassifyObjectPrefersTheExtension() {
+    test:assertEquals(classifyObject("report.pdf", "text/plain"), PDF,
+            "A recognised extension must win over a possibly wrong Content-Type");
+    test:assertEquals(classifyObject("README", "text/plain"), PLAIN_TEXT,
+            "An extensionless key must fall back to its Content-Type");
+    test:assertEquals(classifyObject("blob", "binary/octet-stream"), UNSUPPORTED);
+    test:assertEquals(classifyObject("README", ()), UNSUPPORTED);
+}
+
+@test:Config {}
+isolated function testBareMimeTypeDropsParametersAndGenericTypes() {
+    test:assertEquals(bareMimeType("Text/Markdown; charset=utf-8"), "text/markdown");
+    test:assertEquals(bareMimeType("binary/octet-stream"), ());
+    test:assertEquals(bareMimeType("application/octet-stream"), ());
+    test:assertEquals(bareMimeType(" "), ());
+    test:assertEquals(bareMimeType(()), ());
 }
