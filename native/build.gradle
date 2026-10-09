@@ -17,6 +17,8 @@
 
 plugins {
     id 'java'
+    id 'com.github.spotbugs'
+    id 'checkstyle'
 }
 
 description = 'AWS S3 data loader - Java native utils'
@@ -25,9 +27,9 @@ dependencies {
     // Provided by the Ballerina runtime at execution time.
     implementation group: 'org.ballerinalang', name: 'ballerina-runtime', version: "${ballerinaLangVersion}"
 
-    // Apache Tika: PDF text extraction only. Compiled against here; the same jars are declared
-    // as platform dependencies in Ballerina.toml. Parser dispatch is explicit (PDFParser);
-    // AutoDetectParser is never used.
+    // Apache Tika: PDF text extraction only. Parser dispatch is explicit (PDFParser);
+    // AutoDetectParser is never used. Ballerina does not resolve platform dependencies
+    // transitively, so every runtime jar these pull in must also be declared in Ballerina.toml.
     implementation group: 'org.apache.tika', name: 'tika-core', version: "${tikaVersion}", {
         exclude group: 'xml-apis', module: 'xml-apis'
         exclude group: 'xerces', module: 'xercesImpl'
@@ -46,9 +48,55 @@ dependencies {
     // against the commons-lang3 bundled in the Ballerina runtime (see TextExtractor.java).
     implementation group: 'org.apache.poi', name: 'poi', version: "${poiVersion}"
     implementation group: 'org.apache.poi', name: 'poi-ooxml', version: "${poiVersion}"
+
+    checkstyle project(":checkstyle")
+    checkstyle "com.puppycrawl.tools:checkstyle:${checkstylePluginVersion}"
 }
 
 java {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
 }
+
+spotbugsMain {
+    def classLoader = plugins["com.github.spotbugs"].class.classLoader
+    def SpotBugsConfidence = classLoader.findLoadedClass("com.github.spotbugs.snom.Confidence")
+    def SpotBugsEffort = classLoader.findLoadedClass("com.github.spotbugs.snom.Effort")
+    ignoreFailures = true
+    effort = SpotBugsEffort.MAX
+    reportLevel = SpotBugsConfidence.LOW
+    reportsDir = file("$project.buildDir/reports/spotbugs")
+    def excludeFile = file("${rootDir}/build-config/spotbugs-exclude.xml")
+    if (excludeFile.exists()) {
+        it.excludeFilter = excludeFile
+    }
+    reports {
+        text.enabled = true
+    }
+}
+
+task validateSpotbugs() {
+    doLast {
+        if (spotbugsMain.reports.size() > 0 &&
+                spotbugsMain.reports[0].destination.exists() &&
+                spotbugsMain.reports[0].destination.text.readLines().size() > 0) {
+            spotbugsMain.reports[0].destination?.eachLine {
+                println 'Failure: ' + it
+            }
+            throw new GradleException("Spotbugs rule violations were found.");
+        }
+    }
+}
+
+checkstyle {
+    toolVersion '7.8.2'
+    configFile file("${rootDir}/build-config/checkstyle/build/checkstyle.xml")
+    configProperties = ["suppressionFile": file("${rootDir}/build-config/checkstyle/build/suppressions.xml")]
+}
+
+tasks.withType(Checkstyle) {
+    exclude '**/module-info.java'
+}
+
+spotbugsMain.finalizedBy validateSpotbugs
+checkstyleMain.dependsOn(":checkstyle:downloadCheckstyleRuleFiles")

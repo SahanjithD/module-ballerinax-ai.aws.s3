@@ -1,17 +1,16 @@
 [package]
 distribution = "2201.12.0"
-org = "dasunorg"
+org = "ballerinax"
 name = "ai.aws.s3"
 version = "1.0.0"
 license = ["Apache-2.0"]
 icon = "icon.png"
 authors = ["Ballerina"]
-keywords = ["Vendor/Amazon", "Cloud/Object Storage", "Area/AI & Machine Learning", "Type/Data Loader", "Type/Vector Store", "s3", "vector", "vector store", "vector search", "Name/S3 Vectors Vector Store"]
+keywords = ["Vendor/Amazon", "Cloud/Object Storage", "Area/AI & Machine Learning", "Type/Data Loader", "Type/Vector Store", "s3", "vector", "vector store", "vector search", "Name/AWS S3"]
 repository = "https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3"
-visibility = "private"
 
 [platform.java21]
-graalvmCompatible = true
+graalvmCompatible = false
 
 # Native in-memory text extractor (Apache Tika) for this package.
 [[platform.java21.dependency]]
@@ -31,6 +30,13 @@ version = "3.2.2"
 [[platform.java21.dependency]]
 groupId = "org.apache.tika"
 artifactId = "tika-parser-pdf-module"
+version = "3.2.2"
+
+# XMP metadata support for the PDF module. PDFParser reads a PDF's XMP packet through this jar,
+# so without it any PDF carrying XMP metadata (PDF/A, Adobe output) fails to parse.
+[[platform.java21.dependency]]
+groupId = "org.apache.tika"
+artifactId = "tika-parser-xmp-commons"
 version = "3.2.2"
 
 # Apache POI: OOXML (.docx/.pptx) parsing and text extraction.
@@ -99,7 +105,7 @@ version = "4.4"
 [[platform.java21.dependency]]
 groupId = "org.apache.logging.log4j"
 artifactId = "log4j-api"
-version = "2.25.4"
+version = "2.26.1"
 
 
 [[platform.java21.dependency]]
