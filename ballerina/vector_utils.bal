@@ -23,13 +23,19 @@ import ballerina/uuid;
 // constants so every check that enforces one names it, rather than a magic number.
 const int MAX_VECTOR_KEY_LENGTH = 1024;
 const int MAX_METADATA_KEYS = 50;
-const int MAX_METADATA_KEY_NAME_LENGTH = 63;
+// Applies to the names in an index's `nonFilterableMetadataKeys`, so it bounds `contentKey`.
+const int MAX_NON_FILTERABLE_KEY_LENGTH = 63;
 const int MAX_METADATA_BYTES = 40 * 1024;
 const int MAX_FILTERABLE_METADATA_BYTES = 2 * 1024;
 const int MAX_PUT_BATCH_COUNT = 500;
 const int MAX_DELETE_BATCH_COUNT = 500;
 const int MAX_GET_BATCH_COUNT = 100;
 const int MAX_REQUEST_BYTES = 20 * 1024 * 1024;
+// Room left under `MAX_REQUEST_BYTES` for the request envelope around the vectors: the index
+// identifier, the array brackets and one comma per vector. 64 KiB covers a 500-vector batch with
+// a 2,048-character index ARN many times over.
+const int REQUEST_ENVELOPE_HEADROOM_BYTES = 64 * 1024;
+const int MAX_PUT_PAYLOAD_BYTES = MAX_REQUEST_BYTES - REQUEST_ENVELOPE_HEADROOM_BYTES;
 const int MAX_TOP_K = 10000;
 // The smallest `topK` `queryByEmbedding` will ask S3 Vectors for, regardless of how few results
 // the caller wants. QueryVectors is an approximate search, and a small `topK` narrows how much of
@@ -40,10 +46,75 @@ const int MAX_TOP_K = 10000;
 const int MIN_QUERY_TOP_K = 10;
 const int MAX_LIST_PAGE_SIZE = 1000;
 
-// The metadata key `add` writes the chunk's type under. Not user-configurable (only the content
-// key is): it exists purely so `query` can reconstruct a `Chunk` with something other than the
-// hardcoded default, and its value is a plain string with no size concerns of its own.
-const string CHUNK_TYPE_METADATA_KEY = "type";
+// The metadata key `add` writes the chunk's type under, so `query` can rebuild the `Chunk` with
+// its original type. Underscore-prefixed so it is unlikely to clash with a caller's own metadata;
+// `add` rejects a chunk whose metadata uses it (or the content key) rather than overwrite it.
+const string CHUNK_TYPE_METADATA_KEY = "_chunkType";
+
+// Chunk types whose content is media, not text. Such a chunk can still carry a string (a URL),
+// which would otherwise pass the string-content check and be stored as if it were text.
+final readonly & string[] MEDIA_CHUNK_TYPES = ["image", "audio", "file", "binary"];
+
+// The `ai:Metadata` fields declared as `string`. Assigning a non-string to one of them panics, so
+// `createAiMetadata` checks these before copying a stored value across.
+final readonly & string[] STRING_METADATA_KEYS = ["mimeType", "fileName", "header", "language",
+    "header1", "header2", "header3", "header4", "header5", "header6"];
+
+// ---------------------------------------------------------------------------------------------
+// Init-time validation
+// ---------------------------------------------------------------------------------------------
+
+// Checks that the index is named one way or the other, never both, and that no name is empty.
+isolated function validateVectorIndex(VectorIndex index) returns ai:Error? {
+    string? indexArn = index.indexArn;
+    string? vectorBucketName = index.vectorBucketName;
+    string? indexName = index.indexName;
+    if indexArn is string {
+        if vectorBucketName is string || indexName is string {
+            return error ai:Error(
+                "The S3 Vectors index must be identified by either 'indexArn' alone, or by " +
+                "'vectorBucketName' and 'indexName' together — not both forms at once");
+        }
+        if indexArn.trim() == "" {
+            return error ai:Error("The S3 Vectors 'indexArn' must not be empty");
+        }
+        return;
+    }
+    if vectorBucketName is () || indexName is () {
+        return error ai:Error(
+            "The S3 Vectors index must be identified by either 'indexArn', or by both " +
+            "'vectorBucketName' and 'indexName'");
+    }
+    if vectorBucketName.trim() == "" || indexName.trim() == "" {
+        return error ai:Error("The S3 Vectors 'vectorBucketName' and 'indexName' must not be empty");
+    }
+}
+
+// Checks the store configuration, including the store-level filters, so a mistake surfaces at
+// `init` instead of on the first query.
+isolated function validateStoreConfig(VectorStoreConfig config) returns ai:Error? {
+    string contentKey = config.contentKey;
+    if contentKey.trim() == "" {
+        return error ai:Error("VectorStoreConfig.contentKey must not be empty");
+    }
+    if contentKey.length() > MAX_NON_FILTERABLE_KEY_LENGTH {
+        return error ai:Error(
+            string `VectorStoreConfig.contentKey '${contentKey}' is longer than the ` +
+            string `${MAX_NON_FILTERABLE_KEY_LENGTH} characters S3 Vectors allows for a non-filterable key`);
+    }
+    if contentKey == CHUNK_TYPE_METADATA_KEY {
+        return error ai:Error(
+            string `VectorStoreConfig.contentKey cannot be '${CHUNK_TYPE_METADATA_KEY}': the store uses that ` +
+            "key for the chunk type");
+    }
+    if config.maxListScan < 1 {
+        return error ai:Error("VectorStoreConfig.maxListScan must be at least 1");
+    }
+    ai:MetadataFilters? filters = config.filters;
+    if filters is ai:MetadataFilters {
+        _ = check translateFilters(filters, contentKey);
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Entry -> wire mapping (`add`)
@@ -99,6 +170,11 @@ isolated function mapEntryToWireVector(ai:VectorEntry entry, string contentKey, 
             "metric this index was created with");
     }
 
+    string chunkType = entry.chunk.'type;
+    if MEDIA_CHUNK_TYPES.indexOf(chunkType) is int {
+        return error ai:Error(
+            string `Vector '${key}': S3 Vectors vector store only supports text chunks, not '${chunkType}' chunks`);
+    }
     anydata content = entry.chunk.content;
     if content !is string {
         // Every chunk kind other than text (image/audio/binary/file) carries non-string content,
@@ -110,20 +186,21 @@ isolated function mapEntryToWireVector(ai:VectorEntry entry, string contentKey, 
     }
 
     map<json> metadata = transformMetadata(entry.chunk.metadata);
+    foreach string reservedKey in [contentKey, CHUNK_TYPE_METADATA_KEY] {
+        if metadata.hasKey(reservedKey) {
+            return error ai:Error(
+                string `Vector '${key}' has a metadata field named '${reservedKey}', which the store uses ` +
+                "for the chunk's own content or type. Rename the field, or set a different " +
+                "VectorStoreConfig.contentKey");
+        }
+    }
     metadata[contentKey] = content;
-    metadata[CHUNK_TYPE_METADATA_KEY] = entry.chunk.'type;
+    metadata[CHUNK_TYPE_METADATA_KEY] = chunkType;
 
     if metadata.length() > MAX_METADATA_KEYS {
         return error ai:Error(
             string `Vector '${key}' has ${metadata.length()} metadata keys, exceeding the limit of ` +
             string `${MAX_METADATA_KEYS}`);
-    }
-    foreach string metadataKey in metadata.keys() {
-        if metadataKey.length() > MAX_METADATA_KEY_NAME_LENGTH {
-            return error ai:Error(
-                string `Vector '${key}' has a metadata key '${metadataKey}' longer than ` +
-                string `${MAX_METADATA_KEY_NAME_LENGTH} characters`);
-        }
     }
     int metadataBytes = jsonByteSize(metadata);
     if metadataBytes > MAX_METADATA_BYTES {
@@ -242,6 +319,12 @@ isolated function createAiMetadata(map<json> metadata) returns ai:Metadata|ai:Er
                     string `Vector metadata key 'fileSize' is not numeric: ${fileSize.message()}`, fileSize);
             }
             result[key] = fileSize;
+        } else if STRING_METADATA_KEYS.indexOf(key) is int {
+            if value !is string {
+                return error ai:Error(
+                    string `Vector metadata key '${key}' is not a string: ${value.toJsonString()}`);
+            }
+            result[key] = value;
         } else if key == "index" || key == "id" || key == "prev" {
             // These three ai:Metadata fields are declared `int`. A plain `result[key] = value`
             // would panic with an uncaught InherentTypeViolation if the round-tripped JSON
@@ -274,12 +357,17 @@ isolated function epochSecondsToUtc(decimal epochSeconds) returns time:Utc {
 // chunk-type key becomes `'type` (defaulting to `"text-chunk"` when absent — vectors written by
 // something other than this store's `add` may not carry it), and everything else becomes
 // `ai:Metadata`. `metadata` is consumed by value; the caller does not need to strip the content
-// or type keys first.
+// or type keys first. A vector with no content is an error, which `query` turns into a skip.
 isolated function metadataToChunk(map<json> metadata, string contentKey) returns ai:Chunk|ai:Error {
     map<json> remaining = metadata.clone();
-    json contentValue = remaining.removeIfHasKey(contentKey) ?: "";
+    json contentValue = remaining.removeIfHasKey(contentKey);
     json typeValue = remaining.removeIfHasKey(CHUNK_TYPE_METADATA_KEY) ?: "text-chunk";
 
+    if contentValue is () {
+        return error ai:Error(
+            string `Vector metadata has no '${contentKey}' key; this vector may have been written ` +
+            "by something other than this vector store's 'add'");
+    }
     if contentValue !is string {
         return error ai:Error(
             string `Vector metadata key '${contentKey}' is not a string; this vector may have been written ` +
@@ -321,7 +409,7 @@ isolated function distanceToScore(float? distance, string distanceMetric) return
 // Metadata filter translation (`ai:MetadataFilters` -> S3 Vectors' Mongo-like filter JSON)
 // ---------------------------------------------------------------------------------------------
 
-// Merges the store-level `Configuration.filters` with a per-query filter under `AND`. Either
+// Merges the store-level `VectorStoreConfig.filters` with a per-query filter under `AND`. Either
 // side may be absent; `()` is returned only when both are.
 isolated function mergeFilters(ai:MetadataFilters? configFilters, ai:MetadataFilters? queryFilters)
         returns ai:MetadataFilters? {
@@ -368,13 +456,28 @@ isolated function translateFilters(ai:MetadataFilters filters, string contentKey
 }
 
 isolated function translateSingleFilter(ai:MetadataFilter filter, string contentKey) returns map<json>|ai:Error {
+    json value = check validateFilter(filter, contentKey);
+    if filter.operator == ai:EQUAL {
+        // S3 Vectors treats a bare `{key: value}` as an implicit `$eq`. `validateFilter` has already
+        // ruled out a map value, which would otherwise be read as an operator object.
+        return {[filter.key]: value};
+    }
+    string s3Operator = check mapOperator(filter.operator);
+    return {[filter.key]: {[s3Operator]: value}};
+}
+
+// Checks one filter against what S3 Vectors accepts and returns its value in wire form. A
+// `time:Utc` becomes epoch seconds, the encoding `add` uses for `createdAt`/`modifiedAt`, so a
+// date filter matches what was stored. The filter-only path runs every filter through here (via
+// `translateFilters`) before scanning, so both paths accept and reject exactly the same filters.
+isolated function validateFilter(ai:MetadataFilter filter, string contentKey) returns json|ai:Error {
     if filter.key == contentKey {
         return error ai:Error(
             string `Cannot filter on '${contentKey}': it is declared non-filterable metadata precisely so ` +
             "that chunk text is exempt from the 2 KB filterable-metadata limit");
     }
 
-    json value = filter.value;
+    json value = toFilterOperand(filter.value);
     ai:MetadataFilterOperator operator = filter.operator;
 
     if value is () {
@@ -387,24 +490,58 @@ isolated function translateSingleFilter(ai:MetadataFilter filter, string content
             return error ai:Error(
                 string `Metadata filter on '${filter.key}': '${operator}' requires a non-empty array value`);
         }
+        json[] items = from json item in value select toFilterOperand(item);
+        foreach json item in items {
+            if !isScalar(item) {
+                return error ai:Error(
+                    string `Metadata filter on '${filter.key}': '${operator}' values must be strings, ` +
+                    string `numbers or booleans, got: ${item.toJsonString()}`);
+            }
+        }
+        return items;
     }
     if operator == ai:GREATER_THAN || operator == ai:LESS_THAN ||
             operator == ai:GREATER_THAN_OR_EQUAL || operator == ai:LESS_THAN_OR_EQUAL {
-        if value !is int && value !is float && value !is decimal {
+        if toNumber(value) is () {
             return error ai:Error(
-                string `Metadata filter on '${filter.key}': '${operator}' requires a numeric value — S3 ` +
-                "Vectors range operators do not accept strings. Store timestamps as epoch-seconds numbers " +
-                "(as this store's 'add' does for createdAt/modifiedAt) rather than date strings if you need " +
-                "range filtering on them");
+                string `Metadata filter on '${filter.key}': '${operator}' requires a numeric or time:Utc ` +
+                "value — S3 Vectors range operators do not accept strings. Store timestamps as " +
+                "epoch-seconds numbers (as this store's 'add' does for createdAt/modifiedAt) rather than " +
+                "date strings if you need range filtering on them");
         }
+        return value;
     }
+    if !isScalar(value) {
+        return error ai:Error(
+            string `Metadata filter on '${filter.key}': '${operator}' requires a string, number or boolean ` +
+            string `value, got: ${value.toJsonString()}`);
+    }
+    return value;
+}
 
-    if operator == ai:EQUAL {
-        // S3 Vectors treats a bare `{key: value}` as an implicit `$eq`.
-        return {[filter.key]: value};
+// Converts a `time:Utc` filter value to epoch seconds; any other value is returned unchanged.
+isolated function toFilterOperand(json value) returns json {
+    return value is time:Utc ? utcToEpochSeconds(value) : value;
+}
+
+isolated function isScalar(json value) returns boolean {
+    return value is string|boolean || toNumber(value) is float;
+}
+
+// Reads a JSON number as a `float`, or `()` for anything else. Numbers change type on the JSON
+// round trip (a Ballerina `0.5` float is read back as `0.5d`, a `2048d` as the int `2048`), and
+// Ballerina's `==` is type-sensitive, so numbers are always compared as floats.
+isolated function toNumber(json value) returns float? {
+    if value is int {
+        return <float>value;
     }
-    string s3Operator = check mapOperator(operator);
-    return {[filter.key]: {[s3Operator]: value}};
+    if value is float {
+        return value;
+    }
+    if value is decimal {
+        return <float>value;
+    }
+    return ();
 }
 
 isolated function mapOperator(ai:MetadataFilterOperator operator) returns string|ai:Error {
@@ -445,37 +582,46 @@ isolated function mapOperator(ai:MetadataFilterOperator operator) returns string
 // `ai:VectorKnowledgeBase.deleteByFilter` must evaluate `ai:MetadataFilters` in Ballerina against
 // each vector's metadata after paging it in with `ListVectors`.
 //
-// Mirrors `ballerina/ai`'s own `entryMatchesFilters`/`evaluateFilterNode`/`compareValues`
-// (`_ref/ai/ballerina/utils.bal`) as closely as the different metadata representation allows —
-// missing key is a non-match, `AND` requires no false result, `OR` requires at least one true
-// result, and range operators coerce both sides through `decimal`. One deliberate departure:
-// `ballerina/ai`'s own `compareValues` silently returns `false` for `IN`/`NOT_IN` when the
-// right-hand side isn't an array; this module errors instead, to agree with
-// `translateSingleFilter` below, which already rejects the same malformed input on the
-// QueryVectors path — otherwise a caller's mistake would make a filter-only query or
-// `deleteByFilter` quietly match nothing instead of failing loudly. Semantics must otherwise
-// agree with `translateSingleFilter`, or a filter-only `query` would return a different set of
-// vectors than the equivalent server-side-filtered `QueryVectors` call would for the same
-// filter, and `deleteByFilter` would delete the wrong entries.
+// The result must agree with what `QueryVectors` would match for the same filter, or
+// `deleteByFilter` deletes the wrong entries. So, as on the server: a missing key never matches,
+// numbers compare by value regardless of their Ballerina type, a range filter never matches a
+// non-numeric stored value, and a group with no conditions is dropped (as `translateFilters`
+// drops it from the request) rather than counted as a match. The filters themselves are validated
+// by `translateFilters` before the scan starts. `EQUAL` against an array-valued field matches if
+// any element is equal, as AWS documents for `$eq`; AWS documents no array semantics for the
+// other operators, so they compare the whole value.
 // ---------------------------------------------------------------------------------------------
 
 isolated function matchesFilters(map<json> metadata, ai:MetadataFilters filters) returns boolean|ai:Error {
-    boolean[] results = from ai:MetadataFilters|ai:MetadataFilter node in filters.filters
-        select check evaluateFilterNode(metadata, node);
-    return evaluateCondition(filters.condition, results);
+    boolean? result = check evaluateFilterGroup(metadata, filters);
+    // No conditions at all: nothing is sent to the server, so everything matches.
+    return result ?: true;
 }
 
-isolated function evaluateFilterNode(map<json> metadata, ai:MetadataFilters|ai:MetadataFilter node)
-        returns boolean|ai:Error {
-    if node is ai:MetadataFilter {
-        if !metadata.hasKey(node.key) {
-            return false;
+// Returns `()` for a group with no conditions left once its own empty sub-groups are dropped.
+isolated function evaluateFilterGroup(map<json> metadata, ai:MetadataFilters group) returns boolean?|ai:Error {
+    boolean[] results = [];
+    foreach ai:MetadataFilters|ai:MetadataFilter node in group.filters {
+        if node is ai:MetadataFilter {
+            results.push(check evaluateFilter(metadata, node));
+            continue;
         }
-        return compareMetadataValues(metadata.get(node.key), node.operator, node.value);
+        boolean? nested = check evaluateFilterGroup(metadata, node);
+        if nested is boolean {
+            results.push(nested);
+        }
     }
-    boolean[] results = from ai:MetadataFilters|ai:MetadataFilter child in node.filters
-        select check evaluateFilterNode(metadata, child);
-    return evaluateCondition(node.condition, results);
+    if results.length() == 0 {
+        return ();
+    }
+    return evaluateCondition(group.condition, results);
+}
+
+isolated function evaluateFilter(map<json> metadata, ai:MetadataFilter filter) returns boolean|ai:Error {
+    if !metadata.hasKey(filter.key) {
+        return false;
+    }
+    return compareMetadataValues(metadata.get(filter.key), filter.operator, toFilterOperand(filter.value));
 }
 
 isolated function evaluateCondition(ai:MetadataFilterCondition condition, boolean[] results) returns boolean {
@@ -489,59 +635,51 @@ isolated function compareMetadataValues(json left, ai:MetadataFilterOperator ope
         returns boolean|ai:Error {
     match operator {
         ai:EQUAL => {
-            // One known, documented divergence from server-side QueryVectors filtering: S3
-            // Vectors' `$eq` matches an array-valued metadata field if ANY element equals the
-            // right-hand side, but this local evaluator (like `ai`'s own `compareValues`) only
-            // ever sees `left` as the whole stored value and does plain `==`. A filter-only
-            // query or `deleteByFilter` against array-valued custom metadata can therefore
-            // disagree with what an equivalent embedding query would match. See the README's
-            // Limitations section.
-            return left == right;
+            // As on the server, `$eq` against an array-valued field matches if any element is equal.
+            if left is json[] {
+                foreach json element in left {
+                    if valuesEqual(element, right) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            return valuesEqual(left, right);
         }
         ai:NOT_EQUAL => {
-            return left != right;
+            return !valuesEqual(left, right);
         }
         ai:IN => {
-            // Mismatched with what translateSingleFilter accepts (a non-empty array) is an error
-            // here too, not a silent non-match — otherwise a caller's malformed filter value
-            // would make a filter-only query or deleteByFilter quietly match nothing, while the
-            // equivalent QueryVectors path rejects the same input loudly.
-            if right !is json[] || right.length() == 0 {
-                return error ai:Error(
-                    string `Metadata filter operator '${operator}' requires a non-empty array value, got: ` +
-                    right.toJsonString());
-            }
-            foreach json value in right {
-                if left == value {
-                    return true;
-                }
-            }
-            return false;
+            return check containsValue(operator, right, left);
         }
         ai:NOT_IN => {
-            if right !is json[] || right.length() == 0 {
+            return !check containsValue(operator, right, left);
+        }
+        ai:GREATER_THAN|ai:LESS_THAN|ai:GREATER_THAN_OR_EQUAL|ai:LESS_THAN_OR_EQUAL => {
+            float? rightNumber = toNumber(right);
+            if rightNumber is () {
                 return error ai:Error(
-                    string `Metadata filter operator '${operator}' requires a non-empty array value, got: ` +
-                    right.toJsonString());
+                    string `Cannot evaluate a numeric metadata filter: '${right.toJsonString()}' is not numeric`);
             }
-            foreach json value in right {
-                if left == value {
-                    return false;
+            float? leftNumber = toNumber(left);
+            if leftNumber is () {
+                // The server never matches a range filter against a non-numeric stored value.
+                return false;
+            }
+            match operator {
+                ai:GREATER_THAN => {
+                    return leftNumber > rightNumber;
+                }
+                ai:LESS_THAN => {
+                    return leftNumber < rightNumber;
+                }
+                ai:GREATER_THAN_OR_EQUAL => {
+                    return leftNumber >= rightNumber;
+                }
+                _ => {
+                    return leftNumber <= rightNumber;
                 }
             }
-            return true;
-        }
-        ai:GREATER_THAN => {
-            return check toComparableDecimal(left) > check toComparableDecimal(right);
-        }
-        ai:LESS_THAN => {
-            return check toComparableDecimal(left) < check toComparableDecimal(right);
-        }
-        ai:GREATER_THAN_OR_EQUAL => {
-            return check toComparableDecimal(left) >= check toComparableDecimal(right);
-        }
-        ai:LESS_THAN_OR_EQUAL => {
-            return check toComparableDecimal(left) <= check toComparableDecimal(right);
         }
         _ => {
             return error ai:Error(string `Unsupported metadata filter operator: ${operator}`);
@@ -549,11 +687,28 @@ isolated function compareMetadataValues(json left, ai:MetadataFilterOperator ope
     }
 }
 
-isolated function toComparableDecimal(json value) returns decimal|ai:Error {
-    decimal|error result = value.cloneWithType(decimal);
-    if result is error {
-        return error ai:Error(
-            string `Cannot evaluate a numeric metadata filter: '${value.toJsonString()}' is not numeric`, result);
+isolated function valuesEqual(json left, json right) returns boolean {
+    float? leftNumber = toNumber(left);
+    float? rightNumber = toNumber(right);
+    if leftNumber is float && rightNumber is float {
+        return leftNumber == rightNumber;
     }
-    return result;
+    return left == right;
+}
+
+// Whether `candidates` (an `IN`/`NOT_IN` filter value) holds `value`. A malformed list is an
+// error, matching `validateFilter`, rather than a silent non-match.
+isolated function containsValue(ai:MetadataFilterOperator operator, json candidates, json value)
+        returns boolean|ai:Error {
+    if candidates !is json[] || candidates.length() == 0 {
+        return error ai:Error(
+            string `Metadata filter operator '${operator}' requires a non-empty array value, got: ` +
+            candidates.toJsonString());
+    }
+    foreach json candidate in candidates {
+        if valuesEqual(value, toFilterOperand(candidate)) {
+            return true;
+        }
+    }
+    return false;
 }

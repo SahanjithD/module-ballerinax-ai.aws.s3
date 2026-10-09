@@ -15,88 +15,87 @@
 // under the License.
 
 import ballerina/ai;
+import ballerina/http;
 import ballerinax/aws;
 import ballerinax/aws.auth;
 
-# Describes how to reach the Amazon S3 Vectors service. S3 Vectors is a distinct service from
-# S3 object storage: it has its own endpoint, its own `s3vectors` IAM namespace, and its own
-# API, so it is configured separately from the `s3:ConnectionConfig` the data loader takes.
+# Connection settings for Amazon S3 Vectors.
 public type VectorStoreConnectionConfig record {|
-    # Where credentials come from. Pass `auth:DEFAULT_CREDENTIALS` to use the standard AWS
-    # provider chain (environment variables, web identity token, IAM Identity Center, shared
-    # config/credentials files, external process, container credentials, and EC2 instance
-    # profile — first one that answers), or a static or profile config to name them explicitly
+    # AWS credentials. Use `auth:DEFAULT_CREDENTIALS` for the standard AWS credential chain
     auth:AuthConfig auth;
 
-    # The region hosting the vector bucket. S3 Vectors is not available in every region, and the
-    # bucket must live in the region set here
-    aws:Region|string region = aws:US_EAST_1;
+    # AWS region that hosts the vector bucket
+    aws:Region|string region;
 
-    # Endpoint options, in the same shape `s3:ConnectionConfig` takes. Leave unset for normal
-    # use, in which case the endpoint is derived from `region`. Two of its three fields behave
-    # differently here than they do for S3 proper, because S3 Vectors publishes a narrower set
-    # of endpoints:
-    #
-    # - `customEndpoint` overrides the resolved endpoint, scheme included (e.g.
-    # `http://localhost:9090`), and is intended for testing against a local or proxied endpoint
-    # - `fips` must be left `false`. AWS publishes no FIPS endpoint for S3 Vectors in any region,
-    # so setting it is rejected at initialization rather than failing later on DNS. Front the
-    # service with a FIPS-terminating endpoint and set `customEndpoint` if a validated path is
-    # required
-    # - `dualstack` is ignored and always treated as `true`. S3 Vectors resolves through the
-    # partition's dualstack DNS suffix unconditionally — there is no `amazonaws.com` variant
+    # Overrides the endpoint derived from the region, e.g. for testing. FIPS is not supported
     aws:EndpointConfig endpoint?;
+
+    # Timeout, proxy, TLS and other HTTP client settings
+    HttpConfig httpConfig = {};
 |};
 
-# Identifies the target vector index. S3 Vectors accepts either the bucket and index names
-# together, or the index ARN on its own — supply one form or the other, not both.
-public type IndexIdentifier record {|
-    # The name of the vector bucket holding the index. Required unless `indexArn` is given, and
-    # must be paired with `indexName`
+# HTTP client settings for calls to S3 Vectors.
+public type HttpConfig record {|
+    # Seconds to wait for a response before the request times out
+    decimal timeout = 30;
+
+    # Proxy server to send requests through
+    http:ProxyConfig proxy?;
+
+    # TLS settings, such as a custom trust store
+    http:ClientSecureSocket secureSocket?;
+
+    # Limits on pooled connections
+    http:PoolConfiguration poolConfig?;
+
+    # Stops sending requests for a while after repeated failures
+    http:CircuitBreakerConfig circuitBreaker?;
+
+    # Low-level socket options
+    http:ClientSocketConfig socketConfig = {};
+
+    # Size limits for response status lines, headers and bodies
+    http:ResponseLimitConfigs responseLimits = {};
+|};
+
+# The vector index to use. Give either `vectorBucketName` and `indexName` together, or `indexArn`.
+public type VectorIndex record {|
+    # Vector bucket that holds the index
     string vectorBucketName?;
 
-    # The name of the vector index. Required unless `indexArn` is given, and must be paired with
-    # `vectorBucketName`
+    # Index name within the vector bucket
     string indexName?;
 
-    # The full ARN of the vector index, as an alternative to the bucket and index name pair
+    # Full index ARN. Needed to reach an index owned by another AWS account
     string indexArn?;
 |};
 
-# Configuration options for the Amazon S3 Vectors vector store.
-public type Configuration record {|
-    # The metadata key the chunk's text content is stored under.
-    #
-    # This key **must** be declared in the index's `nonFilterableMetadataKeys` when the index is
-    # created. Filterable metadata is capped at 2 KB per vector while chunk text routinely
-    # exceeds that, and the setting is immutable — an index created without it has to be deleted
-    # and rebuilt. When `validateIndexOnInit` is set, initialization checks this and fails with
-    # an actionable message rather than letting writes fail later
+# How S3 Vectors applies metadata filters in a query with an embedding.
+public enum QueryMode {
+    # Filters during the search. A filtered query can return fewer than `topK` matches
+    CLASSIC,
+    # Filters before the search, so a filtered query returns every match it can, up to `topK`
+    ENHANCED
+}
+
+# Vector store behaviour.
+public type VectorStoreConfig record {|
+    # Metadata key that holds the chunk text. Must be declared non-filterable on the index
     string contentKey = "content";
 
-    # Metadata filters applied to every search, combined with any per-query filters under `AND`
+    # Filters applied to every query, in addition to the query's own filters
     ai:MetadataFilters filters?;
 
-    # Whether `query` issues follow-up `GetVectors` calls to populate `ai:VectorMatch.embedding`.
-    #
-    # The S3 Vectors `QueryVectors` operation never returns vector data, so when this is `false`
-    # the field is an empty array. Enabling it roughly doubles the request count and incurs
-    # additional `GetVectors` charges. No caller within `ballerina/ai` reads the field
+    # How filters are applied when querying by embedding. Unset uses the index's own mode
+    QueryMode queryMode?;
+
+    # Whether query results include embeddings. Costs an extra `GetVectors` call per query
     boolean returnVectorData = false;
 
-    # The maximum number of vectors scanned by a filter-only query — one carrying filters but no
-    # embedding, as issued by `ai:VectorKnowledgeBase.deleteByFilter`.
-    #
-    # S3 Vectors cannot filter server-side while listing, so such a query pages through the index
-    # with `ListVectors` and evaluates the filters locally. Exceeding this bound fails with an
-    # error rather than scanning further
+    # Most vectors a query without an embedding may scan before it fails
     int maxListScan = 100000;
 
-    # Whether to read the index configuration with a `GetIndex` call during initialization.
-    #
-    # One extra request at startup, in exchange for catching a filterable content key, an
-    # embedding-dimension mismatch, and a missing or misnamed index up front instead of on the
-    # first write
+    # Whether to check the index's dimension, metric and content key when the store is created
     boolean validateIndexOnInit = true;
 |};
 

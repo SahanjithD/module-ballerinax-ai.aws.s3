@@ -17,6 +17,8 @@
 import ballerina/ai;
 import ballerina/http;
 import ballerina/lang.runtime;
+import ballerina/log;
+import ballerina/random;
 import ballerinax/aws;
 import ballerinax/aws.auth;
 
@@ -81,6 +83,44 @@ isolated function resolveServiceEndpoint(VectorStoreConnectionConfig config) ret
     return [url, slashIndex is int ? host.substring(0, slashIndex) : host];
 }
 
+// Builds the `http:Client` configuration from the caller's `HttpConfig`. S3 Vectors rejects both
+// HTTP/2 and chunked request bodies, so those are pinned regardless of what was passed:
+//
+// HTTP/2: identical, byte-for-byte identically signed GetIndex requests multiplexed as successive
+// streams on one connection come back 200 and 400 ("Invalid request", x-amzn-errortype:
+// ValidationException) at random, failing roughly a fifth of calls. HTTP/1.1 avoids it entirely.
+//
+// Chunking: a SigV4 `rest-json` request is signed over its whole body and needs a Content-Length
+// to be verified. A chunked body carries neither, so every payload large enough to trip
+// Ballerina's `CHUNKING_AUTO` threshold (e.g. a 4096-dimension vector) is rejected with the same
+// 400, deterministically.
+//
+// Both AWS SDKs default to HTTP/1.1 with an explicit Content-Length for the same reason. Transport
+// retries stay off because `invoke` retries itself, re-signing every attempt; a transport retry
+// on top would nest the two schedules.
+isolated function toClientConfiguration(HttpConfig config) returns http:ClientConfiguration {
+    return {
+        httpVersion: http:HTTP_1_1,
+        http1Settings: {chunking: http:CHUNKING_NEVER},
+        timeout: config.timeout,
+        proxy: config?.proxy,
+        secureSocket: config?.secureSocket,
+        poolConfig: config?.poolConfig,
+        circuitBreaker: config?.circuitBreaker,
+        socketConfig: config.socketConfig,
+        responseLimits: config.responseLimits
+    };
+}
+
+// Releases a credential provider that `VectorStore.init` created before failing, so providers
+// with background refresh (assume-role, SSO) don't leak their threads.
+isolated function closeCredentialProvider(auth:CredentialProvider provider) {
+    error? result = provider.close();
+    if result is error {
+        log:printDebug("Failed to close the AWS credential provider", 'error = result);
+    }
+}
+
 // Signs and sends one S3 Vectors operation, retrying transient failures with a fresh signature
 // on every attempt. Returns the parsed JSON body (`{}` for an operation with no output fields),
 // or a typed `ai:Error` mapped from the response.
@@ -119,12 +159,14 @@ isolated function invoke(http:Client httpClient, auth:CredentialProvider provide
         http:Response|http:ClientError response = httpClient->post(path, request);
         if response is http:ClientError {
             lastError = response;
-            if attempt < MAX_ATTEMPTS {
+            // A TLS failure (bad certificate, protocol mismatch) is a configuration problem that
+            // another attempt cannot fix; connection resets and timeouts are worth retrying.
+            if attempt < MAX_ATTEMPTS && response !is http:SslError {
                 runtime:sleep(backoffDelay(attempt));
                 continue;
             }
             return error ai:Error(
-                string `Failed to call the S3 Vectors '${operation}' operation after ${MAX_ATTEMPTS} attempts: ` +
+                string `Failed to call the S3 Vectors '${operation}' operation after ${attempt} attempt(s): ` +
                 response.message(), response);
         }
 
@@ -160,14 +202,25 @@ isolated function isRetryableStatus(int statusCode) returns boolean {
 // Exponential backoff with a low ceiling, per the comment on `MAX_ATTEMPTS`: retries here exist
 // to smooth over throttling and transient failures, not to ride out a long outage.
 isolated function backoffDelay(int attempt) returns decimal {
-    // Ballerina has no exponentiation operator; double a multiplier `attempt - 1` times
-    // instead (attempt 1 -> x1, attempt 2 -> x2, attempt 3 -> x4, ...).
+    return withJitter(backoffCeiling(attempt));
+}
+
+// The un-jittered delay for an attempt: the base doubled `attempt - 1` times, capped at the
+// maximum. Ballerina has no exponentiation operator, hence the loop.
+isolated function backoffCeiling(int attempt) returns decimal {
     int multiplier = 1;
     foreach int _ in 1 ..< attempt {
         multiplier *= 2;
     }
     decimal delay = RETRY_BASE_DELAY_SECONDS * <decimal>multiplier;
     return delay < RETRY_MAX_DELAY_SECONDS ? delay : RETRY_MAX_DELAY_SECONDS;
+}
+
+// Picks a delay between half the ceiling and the full ceiling, so that clients throttled at the
+// same moment don't all retry in lockstep.
+isolated function withJitter(decimal ceiling) returns decimal {
+    decimal half = ceiling / 2d;
+    return half + half * <decimal>random:createDecimal();
 }
 
 // Describes the index identifier a request targeted, for error messages. `requestPayload` is
@@ -276,12 +329,13 @@ isolated function mapErrorResponse(string operation, int statusCode, http:Respon
 
     string message;
     if statusCode == 403 {
-        message =
-            string `Access denied calling S3 Vectors '${operation}' on ${target} (${detail}). Metadata and ` +
-            "metadata filters on QueryVectors/ListVectors additionally require the 's3vectors:GetVectors' " +
-            "permission on top of the operation's own permission — this is the most common cause of a " +
-            "403 here. Verify the caller has PutVectors, QueryVectors, GetVectors, DeleteVectors, " +
-            "ListVectors, and GetIndex on the target index.";
+        message = string `Access denied calling S3 Vectors '${operation}' on ${target} (${detail}). ` +
+            string `Check that the caller has 's3vectors:${operation}' on the index.`;
+        if operation == "QueryVectors" || operation == "ListVectors" {
+            // Returning metadata or applying a filter also needs GetVectors, which this store always
+            // does; a missing GetVectors grant is the most common cause of a 403 on these two.
+            message += " Returning metadata or filtering also requires 's3vectors:GetVectors'.";
+        }
     } else if statusCode == 404 {
         message =
             string `S3 Vectors '${operation}' failed: ${target} was not found (${detail}). Also confirm S3 ` +
@@ -315,7 +369,7 @@ isolated function mapErrorResponse(string operation, int statusCode, http:Respon
 // Merges the target index identifier into a request body, following the exactly-one-of contract
 // every S3 Vectors data-plane operation shares: `indexArn` alone, or `vectorBucketName` +
 // `indexName` together.
-isolated function withIndexIdentifier(map<json> body, IndexIdentifier index) returns map<json> {
+isolated function withIndexIdentifier(map<json> body, VectorIndex index) returns map<json> {
     string? indexArn = index.indexArn;
     if indexArn is string {
         body["indexArn"] = indexArn;
@@ -329,7 +383,7 @@ isolated function withIndexIdentifier(map<json> body, IndexIdentifier index) ret
 // `GetIndex` — read back the immutable attributes (dimension, distance metric, non-filterable
 // metadata keys) of the target index.
 isolated function getIndex(http:Client httpClient, auth:CredentialProvider provider, string host,
-        aws:Region|string region, IndexIdentifier index) returns IndexAttributes|ai:Error {
+        aws:Region|string region, VectorIndex index) returns IndexAttributes|ai:Error {
     json body = withIndexIdentifier({}, index);
     json response = check invoke(httpClient, provider, host, region, "GetIndex", body);
     GetIndexResponse|error result = response.cloneWithType(GetIndexResponse);
@@ -343,7 +397,7 @@ isolated function getIndex(http:Client httpClient, auth:CredentialProvider provi
 // `PutVectors` — upserts a batch of vectors. The caller (`vector_store.bal`) is responsible for
 // keeping each batch within the 500-vector / 20 MiB request limits.
 isolated function putVectors(http:Client httpClient, auth:CredentialProvider provider, string host,
-        aws:Region|string region, IndexIdentifier index, json[] vectors) returns ai:Error? {
+        aws:Region|string region, VectorIndex index, json[] vectors) returns ai:Error? {
     json body = withIndexIdentifier({"vectors": vectors}, index);
     _ = check invoke(httpClient, provider, host, region, "PutVectors", body);
 }
@@ -351,7 +405,7 @@ isolated function putVectors(http:Client httpClient, auth:CredentialProvider pro
 // `DeleteVectors` — deletes a batch of vectors by key. Idempotent: a key that does not exist is
 // not an error.
 isolated function deleteVectors(http:Client httpClient, auth:CredentialProvider provider, string host,
-        aws:Region|string region, IndexIdentifier index, string[] keys) returns ai:Error? {
+        aws:Region|string region, VectorIndex index, string[] keys) returns ai:Error? {
     json body = withIndexIdentifier({"keys": keys}, index);
     _ = check invoke(httpClient, provider, host, region, "DeleteVectors", body);
 }
@@ -361,8 +415,8 @@ isolated function deleteVectors(http:Client httpClient, auth:CredentialProvider 
 // satisfied, re-sending the same `queryVector`/`topK`/`filter` each time, per AWS's pagination
 // contract for this operation.
 isolated function queryVectors(http:Client httpClient, auth:CredentialProvider provider, string host,
-        aws:Region|string region, IndexIdentifier index, json queryVector, int topK, json filter,
-        string? nextToken) returns QueryVectorsResponse|ai:Error {
+        aws:Region|string region, VectorIndex index, json queryVector, int topK, json filter,
+        QueryMode? queryMode, string? nextToken) returns QueryVectorsResponse|ai:Error {
     map<json> body = {
         "queryVector": queryVector,
         topK,
@@ -374,6 +428,10 @@ isolated function queryVectors(http:Client httpClient, auth:CredentialProvider p
     // JSON null, which S3 Vectors would otherwise have to reject.
     if filter !is () {
         body["filter"] = filter;
+    }
+    // Omitted unless set, so the index's own mode applies; AWS rejects `CLASSIC` on an `ENHANCED` index.
+    if queryMode is QueryMode {
+        body["queryMode"] = queryMode;
     }
     if nextToken is string {
         body["nextToken"] = nextToken;
@@ -388,14 +446,15 @@ isolated function queryVectors(http:Client httpClient, auth:CredentialProvider p
 }
 
 // `ListVectors` — one page of an unfiltered index walk, used for the filter-only query path and
-// for `deleteByFilter` support. `returnData` is left off; only metadata is needed to evaluate
-// filters and collect keys.
+// for `deleteByFilter` support. `returnData` is set only when the caller wants embeddings back,
+// which saves the follow-up `GetVectors` calls the `QueryVectors` path needs.
 isolated function listVectors(http:Client httpClient, auth:CredentialProvider provider, string host,
-        aws:Region|string region, IndexIdentifier index, int maxResults, string? nextToken)
+        aws:Region|string region, VectorIndex index, int maxResults, boolean returnData, string? nextToken)
         returns ListVectorsResponse|ai:Error {
     map<json> body = {
         "maxResults": maxResults,
-        "returnMetadata": true
+        "returnMetadata": true,
+        "returnData": returnData
     };
     if nextToken is string {
         body["nextToken"] = nextToken;
@@ -412,7 +471,7 @@ isolated function listVectors(http:Client httpClient, auth:CredentialProvider pr
 // `GetVectors` — used only to hydrate `ai:VectorMatch.embedding` when `returnVectorData` is on.
 // The caller batches keys at the 100-per-call limit.
 isolated function getVectors(http:Client httpClient, auth:CredentialProvider provider, string host,
-        aws:Region|string region, IndexIdentifier index, string[] keys) returns GetVectorsResponse|ai:Error {
+        aws:Region|string region, VectorIndex index, string[] keys) returns GetVectorsResponse|ai:Error {
     map<json> body = {"keys": keys, "returnData": true};
     json response = check invoke(httpClient, provider, host, region, "GetVectors", withIndexIdentifier(body, index));
     GetVectorsResponse|error result = response.cloneWithType(GetVectorsResponse);

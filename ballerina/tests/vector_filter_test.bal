@@ -16,6 +16,7 @@
 
 import ballerina/ai;
 import ballerina/test;
+import ballerina/time;
 
 // Pure unit tests for the two halves of metadata filtering in `vector_utils.bal`:
 // `translateFilters` (server-side, sent to `QueryVectors`) and `matchesFilters` (local
@@ -232,11 +233,60 @@ isolated function testMatchesFiltersDeeplyNestedGroups() returns ai:Error? {
 }
 
 @test:Config {}
-isolated function testMatchesFiltersRejectsNonNumericRangeComparison() {
-    boolean|ai:Error result = matchesFilters({year: "not-a-number"}, {filters: [filter("year", ai:GREATER_THAN, 2020)]});
-    test:assertTrue(result is ai:Error,
-            "A non-numeric stored value compared with a range operator must surface as an error, mirroring " +
-            "ballerina/ai's own compareValues behaviour rather than silently evaluating to false");
+isolated function testMatchesFiltersTreatsNonNumericStoredValueAsNonMatch() returns ai:Error? {
+    // S3 Vectors never matches a range filter against a non-numeric value; one such vector must
+    // not abort a whole scan either.
+    boolean result = check matchesFilters({year: "not-a-number"}, {filters: [filter("year", ai:GREATER_THAN, 2020)]});
+    test:assertFalse(result, "A non-numeric stored value must not match a range filter");
+}
+
+@test:Config {}
+isolated function testMatchesFiltersComparesNumbersAcrossTypes() returns ai:Error? {
+    // JSON parsing reads 0.5 back as a decimal and 2048d as an int; equality must not depend on that.
+    map<json> metadata = {score: 0.5d, fileSize: 2048, ratio: 0.1d};
+    test:assertTrue(check matchesFilters(metadata, {filters: [filter("score", ai:EQUAL, 0.5)]}));
+    test:assertFalse(check matchesFilters(metadata, {filters: [filter("score", ai:NOT_EQUAL, 0.5)]}));
+    test:assertTrue(check matchesFilters(metadata, {filters: [filter("fileSize", ai:EQUAL, 2048d)]}));
+    test:assertTrue(check matchesFilters(metadata, {filters: [filter("fileSize", ai:IN, [1, 2048d])]}));
+    test:assertFalse(check matchesFilters(metadata, {filters: [filter("fileSize", ai:NOT_IN, [2048.0])]}));
+    test:assertTrue(check matchesFilters(metadata, {filters: [filter("ratio", ai:GREATER_THAN_OR_EQUAL, 0.1)]}));
+}
+
+@test:Config {}
+isolated function testMatchesFiltersDropsEmptyGroupsLikeTheServer() returns ai:Error? {
+    // translateFilters drops an empty group from the request; local evaluation must not count it
+    // as a match, or an OR with an empty group would match (and deleteByFilter delete) everything.
+    ai:MetadataFilters orWithEmptyGroup = {
+        condition: ai:OR,
+        filters: [{condition: ai:AND, filters: []}, filter("genre", ai:EQUAL, "drama")]
+    };
+    test:assertEquals(check translateFilters(orWithEmptyGroup, "content"), {"genre": "drama"});
+    test:assertFalse(check matchesFilters({genre: "comedy"}, orWithEmptyGroup));
+    test:assertTrue(check matchesFilters({genre: "drama"}, orWithEmptyGroup));
+    test:assertTrue(check matchesFilters({genre: "comedy"}, {filters: []}),
+            "No conditions at all matches everything, as the server does with no filter");
+}
+
+@test:Config {}
+isolated function testFiltersConvertUtcToEpochSeconds() returns ai:Error? {
+    time:Utc cutoff = [1700000000, 0.5d];
+    ai:MetadataFilters filters = {filters: [filter("createdAt", ai:GREATER_THAN, cutoff)]};
+    test:assertEquals(check translateFilters(filters, "content"), {"createdAt": {"$gt": 1700000000.5d}});
+    test:assertTrue(check matchesFilters({createdAt: 1700000001}, filters));
+    test:assertFalse(check matchesFilters({createdAt: 1699999999}, filters));
+}
+
+@test:Config {}
+isolated function testTranslateFiltersRejectsNonScalarValues() {
+    ai:MetadataFilter[] badFilters = [
+        filter("genre", ai:EQUAL, {"$ne": "comedy"}),
+        filter("genre", ai:NOT_EQUAL, ["a", "b"]),
+        filter("genre", ai:IN, [{"$exists": true}])
+    ];
+    foreach ai:MetadataFilter badFilter in badFilters {
+        test:assertTrue(translateFilters({filters: [badFilter]}, "content") is ai:Error,
+                string `A non-scalar filter value must be rejected: ${badFilter.toString()}`);
+    }
 }
 
 @test:Config {}
@@ -338,4 +388,12 @@ isolated function testTranslationAndEvaluationAgree() returns ai:Error? {
                 string `Case '${testCase.description}': local evaluation disagreed with the expected S3 ` +
                 "Vectors filter semantics");
     }
+}
+
+@test:Config {}
+isolated function testEqualMatchesAnyElementOfAnArrayValue() returns ai:Error? {
+    map<json> metadata = {genres: ["documentary", "romance"]};
+    test:assertTrue(check matchesFilters(metadata, {filters: [filter("genres", ai:EQUAL, "documentary")]}),
+            "EQUAL must match an array field containing the value, as S3 Vectors' $eq does");
+    test:assertFalse(check matchesFilters(metadata, {filters: [filter("genres", ai:EQUAL, "comedy")]}));
 }
