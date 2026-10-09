@@ -18,17 +18,9 @@ import ballerina/ai;
 import ballerina/io;
 import ballerina/test;
 
-// These tests run real fixture files — a genuine PDF, Word .docx, PowerPoint .pptx, and a legacy
-// binary .doc — through `buildDocument`, the function the loader calls once an object's bytes are
-// in hand. They are what stops a Tika, PDFBox or POI version bump from silently breaking text
-// extraction: a dependency change that broke a parser would fail here rather than quietly
-// yielding empty documents in production.
-//
-// The three binary fixtures are deliberately **multi-unit**: the PDF has two pages, the .docx two
-// paragraphs, and the .pptx two slides, with the two asserted phrases placed in *separate* units.
-// `assertOrderedPhrases` then checks both are present and that the first precedes the second, so an
-// extractor that dropped the trailing page/slide/paragraph, or concatenated units out of order,
-// fails here rather than passing on the first unit alone.
+// Runs real fixture files through `buildDocument`, so a Tika, PDFBox or POI upgrade that breaks
+// extraction fails here. The PDF, .docx and .pptx fixtures each have two pages, paragraphs or
+// slides, and `assertOrderedPhrases` checks both come through in order.
 
 // Asserts `first` and `second` both appear in `content`, with `first` strictly before `second`.
 isolated function assertOrderedPhrases(string content, string first, string second, string label) {
@@ -71,9 +63,7 @@ isolated function testExtractTextFromPdfFixture() returns error? {
     test:assertEquals(metadata["key"], "corpus/sample.pdf");
 }
 
-// A PDF carrying an XMP metadata packet, as PDF/A files and Adobe output do. Tika's PDF parser
-// reads it through `tika-parser-xmp-commons`, which must be declared in Ballerina.toml: without it
-// every such PDF fails with a NoClassDefFoundError, which the plain fixtures above never trigger.
+// PDF/A and Adobe output carry an XMP packet, which Tika parses with `tika-parser-xmp-commons`.
 @test:Config {}
 isolated function testExtractTextFromPdfWithXmpMetadata() returns error? {
     ai:TextDocument doc = check buildFromFixture("xmp.pdf", "corpus/xmp.pdf").ensureType();
@@ -126,25 +116,8 @@ isolated function testExtractTextFromXlsxFixture() returns error? {
 // Image-bearing documents (image-only and image+text) for each binary format
 // ---------------------------------------------------------------------------
 //
-// The extractors are text-only by design — Tika's PDFParser runs no OCR, and POI's
-// XWPFWordExtractor/SlideShowExtractor read text runs, not pictures. These fixtures pin down what
-// that means for the two content shapes the pure-text fixtures above never exercise:
-//
-//   *image-only.*  a scanned-style document whose only content is an embedded image and no text
-//                  run at all. Extraction yields no text, and `buildDocument` wraps that verbatim:
-//                  the object becomes a `TextDocument` with empty content — no skip, no warning, no
-//                  error (contrast `testUnsupportedBinaryYieldsNoDocument`, where an unsupported
-//                  *type* is skipped; here the type is supported but its text is empty). This is a
-//                  known limitation, not a defect to fix: a caller wanting scanned PDFs indexed must
-//                  OCR them upstream. The tests assert the empty-but-successful contract so a future
-//                  change that started erroring, panicking, or skipping these would be caught.
-//
-//   *mixed.*       an image and text together. The text must still come through intact and the
-//                  image must not corrupt or truncate it, so extraction of a real-world document
-//                  that interleaves both is proven, not assumed.
-//
-// The fixtures embed a genuine 1x1 PNG (PDFs embed a raw RGB image XObject); the .docx/.pptx are
-// built from the same known-good OPC packages as the sample.* fixtures with the image part added.
+// There is no OCR, so an image-only document extracts to empty text (an empty document, not an
+// error), and in a mixed document the text must come through intact.
 
 // Asserts a supported binary type with no extractable text yields a successful, empty document.
 isolated function assertEmptyButSuccessful(string fixture, string key, string expectedMime,
@@ -178,11 +151,8 @@ isolated function testImageOnlyPptxYieldsEmptyDocument() returns error? {
 
 @test:Config {}
 isolated function testImageOnlyXlsxYieldsNoCellText() returns error? {
-    // The .xlsx analogue of the image-only PDF/DOCX/PPTX cases: a sheet whose only content is an
-    // embedded image. POI reads no OCR text from the picture, so no *cell* data is extracted — but
-    // unlike the other formats, XSSFExcelExtractor always emits each sheet's name, so the result is
-    // the sheet name alone ("Picture") rather than literally empty. The contract this pins down is
-    // that the image contributes no text and no binary leaks into the output.
+    // Unlike the other formats, the .xlsx extractor always emits the sheet name, so the result is
+    // "Picture" rather than empty.
     ai:TextDocument doc =
         check buildFromFixture("image-only.xlsx", "corpus/image-only.xlsx").ensureType();
     string content = contentOf(doc);
@@ -271,9 +241,7 @@ isolated function testExtractTextFromPlainTextFixture() returns error? {
 
 @test:Config {}
 isolated function testLegacyDocFixtureIsNotExtracted() returns error? {
-    // A genuine legacy binary Word document. Classification must reject it before any parser
-    // sees it, so `buildDocument` returns () and the caller decides whether that is a skip
-    // (prefix walk) or an error (explicitly named key).
+    // Rejected before any parser sees it; the caller decides between skip and error.
     ai:TextDocument? doc = check buildFromFixture("legacy.doc", "corpus/legacy.doc");
     test:assertTrue(doc is (), "A legacy .doc must not produce a document");
     test:assertEquals(classify("corpus/legacy.doc", ()), UNSUPPORTED_OFFICE,
@@ -357,9 +325,7 @@ isolated function testMetadataToleratesMalformedLastModified() returns error? {
 
 @test:Config {}
 isolated function testBlankStringMetadataFieldsAreOmitted() returns error? {
-    // `size` is a required int (0 for an empty object), but `lastModified`/`eTag` are strings
-    // whose blank value is treated as "no value" and left out of the metadata rather than
-    // stored as "". A zero size is a real value and is recorded as fileSize 0.
+    // Blank `lastModified`/`eTag` are left out; a zero size is still recorded.
     ai:TextDocument doc =
         check buildDocument("body".toBytes(), TEST_BUCKET, "a.txt", 0, "", "").ensureType();
     ai:Metadata metadata = check doc.metadata.ensureType();
@@ -383,9 +349,6 @@ isolated function testHtmlMimeTypeIsCleanForChunkerRouting() returns error? {
 
 @test:Config {}
 isolated function testClassificationMatchesAiSupportedTypes() {
-    // The supported set covers `ballerina/ai`'s built-in TextDataLoader (pdf, docx, pptx, html,
-    // htm, md, plus the natively-textual types S3 buckets hold) and additionally .xlsx, which
-    // this loader extracts via POI's XSSFExcelExtractor.
     test:assertEquals(classify("a.pdf", ()), PDF);
     test:assertEquals(classify("a.docx", ()), DOCX);
     test:assertEquals(classify("a.pptx", ()), PPTX);
@@ -417,7 +380,7 @@ isolated function testClassificationIsCaseInsensitive() {
 @test:Config {}
 isolated function testClassificationIgnoresDotsInDirectoryComponents() {
     // The extension must be read from the last '/'-segment only. A dot in a directory
-    // component must never be mistaken for a file extension (regression).
+    // component must never be mistaken for a file extension.
     test:assertEquals(classify("example.com/homepage.html", ()), PLAIN_TEXT,
             "A dotted directory prefix must not shadow the real .html extension");
     test:assertEquals(classify("v1.2/report.pdf", ()), PDF,
@@ -442,10 +405,7 @@ isolated function testClassificationPrefersMimeTypeWhenSupplied() {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), XLSX);
 }
 
-// The case the test above cannot reach: a key whose extension *disagrees* with the supplied MIME
-// type. Every assertion here failed before the MIME checks were separated from the extension
-// checks — the text-extension test was OR-ed into the first condition, so a `.txt`/`.md`/`.csv`
-// key returned PLAIN_TEXT regardless of what the caller said the media type was.
+// An explicit MIME type wins even when the extension disagrees.
 @test:Config {}
 isolated function testSuppliedMimeTypeBeatsAConflictingExtension() {
     test:assertEquals(classify("report.txt", "application/pdf"), PDF,

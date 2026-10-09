@@ -16,16 +16,9 @@
 
 import ballerina/http;
 
-// An in-process stand-in for the S3 Vectors service. There is no S3 Vectors emulator (unlike,
-// say, LocalStack for plain S3 — S3 Vectors support there is tracked but backlogged), so
-// `vector_store_test.bal` points a real `VectorStore` at this listener instead of a live
-// endpoint. It does not verify SigV4 signatures — that would just be re-testing
-// `ballerinax/aws.auth`, which is exercised separately by the header-shape tests in
-// `vector_mapping_test.bal` (`testSignedHeadersIncludeTheExpectedSigV4Set` and
-// `testSignedHeadersIncludeSessionTokenForTemporaryCredentials`) — it only
-// records what each operation sent and returns whatever response the test queued for it,
-// letting the store's own request-building, batching, pagination, and response/error mapping
-// run for real against something.
+// An in-process stand-in for S3 Vectors, which has no emulator. It records each request and returns
+// whatever response the test queued, so the store's real request building, batching, paging and
+// error mapping run against it. It doesn't verify signatures; `vector_mapping_test.bal` covers that.
 
 const int MOCK_PORT = 20990;
 

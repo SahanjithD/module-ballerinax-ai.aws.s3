@@ -18,11 +18,6 @@ import ballerina/io;
 import ballerina/test;
 
 // Shared test helpers.
-//
-// `paging_test.bal` drives `TextDataLoader.load()` through a mocked `s3:Client`. The rest of the
-// unit suite tests the decisions the loader delegates to module-private functions:
-// classification, the prefix-walk filters, document construction and metadata mapping, and
-// stream draining.
 
 const string TEST_BUCKET = "test-bucket";
 

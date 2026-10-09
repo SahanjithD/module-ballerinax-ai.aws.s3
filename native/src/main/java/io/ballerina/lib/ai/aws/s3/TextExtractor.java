@@ -39,54 +39,30 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 
 /**
- * Extracts plain text from documents held entirely in memory.
+ * Extracts plain text from PDF and OOXML documents held in memory, so object content never touches
+ * disk.
  *
- * <p>This loader supports PDF and the OOXML Office formats (.docx / .pptx / .xlsx). Legacy binary
- * Office formats (.doc / .ppt / .xls) are classified and rejected on the Ballerina side, so the POI
- * HWPF/HSLF/HSSF stack is never exercised.
- *
- * <p>Unlike {@code ai:TextDataLoader}, which reads from a file path, this reads straight from
- * the in-memory bytes downloaded from S3 via a {@link ByteArrayInputStream}, so no temporary
- * file is written by this code — confidential object content need never touch disk. The
- * underlying libraries are also configured to stay in memory: PDFBox is given an explicit
- * {@link PDFParserConfig} with no main-memory limit, so it cannot fall back to a scratch file.
- * One caveat remains outside this class's control: POI honours the global system property
- * {@code org.apache.poi.openxml4j.opc.ZipPackage.useTempFilePackageParts}, which, if a host
- * sets it, makes POI spill OOXML package parts to {@code java.io.tmpdir}. It defaults to false.
- *
- * <p><b>Parser dispatch is always explicit; {@code AutoDetectParser} is never used.</b> The
- * caller has already classified the document, so the exact parser is selected here by format.
- * That matters because Tika's detection machinery probes archive formats through
- * {@code commons-compress}, which is both unnecessary and sensitive to the runtime's
- * transitive library versions.
- *
- * <p>PDFs go through Tika's {@link PDFParser}. The OOXML formats deliberately bypass Tika
- * altogether and use POI's format-specific extractors directly. Tika's {@code OOXMLParser}
- * cannot be used here: it internally runs {@code DefaultZipContainerDetector} to identify the
- * OOXML sub-format, and that detector probes TAR via {@code commons-compress}. From
- * commons-compress 1.28.0 that path calls {@code SystemProperties.getUserName(String)}, an
- * overload added in commons-lang3 3.17.0, whereas the Ballerina runtime bundles a shaded
- * commons-lang3 3.14.0 that takes precedence on the classpath — so .pptx extraction through
- * Tika fails with a {@code NoSuchMethodError}. Reading the OPC package directly through POI
- * avoids the detection pass entirely and is immune to that conflict.
+ * <p>Parsers are chosen explicitly; Tika's {@code AutoDetectParser} and {@code OOXMLParser} are not
+ * used, because their container detection probes archives through a commons-compress that needs a
+ * newer commons-lang3 than the one bundled in the Ballerina runtime. The OOXML formats go through
+ * POI directly.
  */
 public final class TextExtractor {
 
-    // A BodyContentHandler write limit of -1 means "no limit" on extracted content size.
     private static final int UNLIMITED_CONTENT_SIZE = -1;
 
-    // Passed to PDFBox as its main-memory budget; -1 means "never spill to a temporary file".
+    // -1 keeps PDFBox from spilling to a temporary file.
     private static final long UNLIMITED_MAIN_MEMORY = -1L;
 
     private TextExtractor() {
     }
 
     /**
-     * Extracts the textual content of a PDF document held entirely in memory.
+     * Extracts the text of a PDF.
      *
-     * @param content  the raw PDF bytes
-     * @param fileName the object key, used as a Tika resource-name hint
-     * @return the extracted text as a {@link BString}, or a Ballerina error on failure
+     * @param content  the PDF bytes
+     * @param fileName the object key, passed to Tika as a resource-name hint
+     * @return the text, or a Ballerina error
      */
     public static Object extractPdfText(BArray content, BString fileName) {
         try (InputStream stream = new ByteArrayInputStream(content.getBytes())) {
@@ -94,7 +70,6 @@ public final class TextExtractor {
             BodyContentHandler handler = new BodyContentHandler(UNLIMITED_CONTENT_SIZE);
             Metadata metadata = new Metadata();
             metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, fileName.getValue());
-            // Pin PDFBox to memory so parsing can never spill a scratch file to disk.
             PDFParserConfig pdfConfig = new PDFParserConfig();
             pdfConfig.setMaxMainMemoryBytes(UNLIMITED_MAIN_MEMORY);
             ParseContext parseContext = new ParseContext();
@@ -107,18 +82,14 @@ public final class TextExtractor {
     }
 
     /**
-     * Extracts the textual content of a Word document (.docx) held entirely in memory, reading
-     * the OPC package directly through POI.
+     * Extracts the text of a Word document (.docx).
      *
-     * @param content  the raw .docx bytes
-     * @param fileName the object key (unused by POI; kept for signature symmetry)
-     * @return the extracted text as a {@link BString}, or a Ballerina error on failure
+     * @param content  the document bytes
+     * @param fileName unused; kept so all extractors share a signature
+     * @return the text, or a Ballerina error
      */
     public static Object extractDocxText(BArray content, BString fileName) {
-        // Own the OPCPackage as the closable resource so it is released even if the extractor's
-        // constructor fails while parsing malformed (untrusted) input. The extractor is not closed
-        // separately: doing so would close the package a second time and make POI log a spurious
-        // warning on every extraction.
+        // The package is the closed resource; closing the extractor too would close it twice.
         try (InputStream stream = new ByteArrayInputStream(content.getBytes());
              OPCPackage pkg = OPCPackage.open(stream)) {
             XWPFWordExtractor extractor = new XWPFWordExtractor(pkg);
@@ -129,17 +100,13 @@ public final class TextExtractor {
     }
 
     /**
-     * Extracts the textual content of a PowerPoint presentation (.pptx) held entirely in
-     * memory, reading the slide show directly through POI.
+     * Extracts the text of a PowerPoint presentation (.pptx).
      *
-     * @param content  the raw .pptx bytes
-     * @param fileName the object key (unused by POI; kept for signature symmetry)
-     * @return the extracted text as a {@link BString}, or a Ballerina error on failure
+     * @param content  the presentation bytes
+     * @param fileName unused; kept so all extractors share a signature
+     * @return the text, or a Ballerina error
      */
     public static Object extractPptxText(BArray content, BString fileName) {
-        // As with .docx, own the slide show as the closable resource so it is released even if the
-        // extractor's constructor fails; the extractor is not closed separately (that would close
-        // the slide show a second time).
         try (InputStream stream = new ByteArrayInputStream(content.getBytes());
              XMLSlideShow slideShow = new XMLSlideShow(stream)) {
             SlideShowExtractor<?, ?> extractor = new SlideShowExtractor<>(slideShow);
@@ -150,22 +117,14 @@ public final class TextExtractor {
     }
 
     /**
-     * Extracts the textual content of an Excel workbook (.xlsx) held entirely in memory, reading
-     * the workbook directly through POI.
+     * Extracts the text of an Excel workbook (.xlsx): tab-separated cells, one row per line, each
+     * sheet prefixed with its name. Formula cells give their cached result.
      *
-     * <p>{@link XSSFExcelExtractor} serialises cells as tab-separated values, one row per line, and
-     * (with sheet names enabled) prefixes each sheet with its name — a linear rendering suited to
-     * downstream chunking. Formula cells contribute their last cached result rather than the
-     * formula source, which is what a reader of the sheet would see.
-     *
-     * @param content  the raw .xlsx bytes
-     * @param fileName the object key (unused by POI; kept for signature symmetry)
-     * @return the extracted text as a {@link BString}, or a Ballerina error on failure
+     * @param content  the workbook bytes
+     * @param fileName unused; kept so all extractors share a signature
+     * @return the text, or a Ballerina error
      */
     public static Object extractXlsxText(BArray content, BString fileName) {
-        // As with .docx/.pptx, own the workbook (and its OPC package) as the closable resource so it
-        // is released even if the extractor's constructor fails; the extractor is not closed
-        // separately (that would close the workbook a second time).
         try (InputStream stream = new ByteArrayInputStream(content.getBytes());
              XSSFWorkbook workbook = new XSSFWorkbook(stream)) {
             XSSFExcelExtractor extractor = new XSSFExcelExtractor(workbook);
@@ -177,19 +136,10 @@ public final class TextExtractor {
     }
 
     /**
-     * Converts a failure into a Ballerina error, keeping the original exception as its cause.
-     *
-     * <p>{@link Throwable} is caught rather than {@link Exception} because a Java {@code Error}
-     * escaping an external function surfaces in Ballerina as a <em>panic</em>, which a caller
-     * cannot handle. Untrusted S3 content can trigger a {@code StackOverflowError} (a deeply
-     * nested PDF object graph) or a {@code LinkageError} (a dependency conflict); both affect
-     * only the document being parsed, so they become an ordinary error for that object.
-     *
-     * <p>Other {@link VirtualMachineError}s, chiefly {@link OutOfMemoryError}, are rethrown: the
-     * JVM may no longer be in a usable state, so carrying on with the next object is unsafe.
-     *
-     * <p>The exception's simple class name is always included, because several POI and PDFBox
-     * exceptions carry a {@code null} message and would otherwise produce an empty error.
+     * Converts a failure into a Ballerina error with the exception as its cause. {@link Throwable}
+     * is caught because an {@code Error} escaping to Ballerina is an unrecoverable panic, and a
+     * {@code StackOverflowError} from a malformed document affects only that document. Other
+     * {@link VirtualMachineError}s, such as {@link OutOfMemoryError}, are rethrown.
      */
     private static Object toBallerinaError(Throwable t) {
         if (t instanceof VirtualMachineError && !(t instanceof StackOverflowError)) {

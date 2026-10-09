@@ -99,93 +99,73 @@ public type VectorStoreConfig record {|
     boolean validateIndexOnInit = true;
 |};
 
-// ---------------------------------------------------------------------------------------------
-// Wire records. These mirror the S3 Vectors API shapes narrowed to the fields the store reads.
-// All are open (`record {`, not `record {|`) so that fields this store ignores — creationTime,
-// encryptionConfiguration, and anything AWS adds later — do not break `cloneWithType`.
-// ---------------------------------------------------------------------------------------------
+// Wire records, narrowed to the fields the store reads. Open records, so fields AWS adds later
+// don't break `cloneWithType`.
 
-// The `GetIndex` response.
 type GetIndexResponse record {
     IndexAttributes index;
 };
 
-// The attributes of a vector index, as returned by `GetIndex`. `dimension` and `distanceMetric`
-// are fixed at creation time, which is what makes them worth caching for the life of the store.
 type IndexAttributes record {
     string vectorBucketName;
     string indexName;
     string indexArn;
     int dimension;
-    // Either "cosine" or "euclidean"; kept as a string rather than an enum so that a metric
-    // added by AWS later surfaces as a value to handle rather than a conversion failure.
+    // A string rather than an enum, so a new metric isn't a conversion failure.
     string distanceMetric;
     MetadataConfiguration metadataConfiguration?;
 };
 
-// The metadata configuration of a vector index. Absent entirely when the index was created
-// without any non-filterable keys.
+// Absent when the index has no non-filterable keys.
 type MetadataConfiguration record {
     string[] nonFilterableMetadataKeys;
 };
 
-// Vector data. A union in the API with a single member today; values are stored as 32-bit
-// floats, so a Ballerina `float` (IEEE-754 binary64) does not round-trip exactly.
+// Values are 32-bit floats, so a Ballerina `float` doesn't round-trip exactly.
 type VectorData record {
     float[] float32?;
 };
 
-// The `QueryVectors` response. `distanceMetric` echoes the metric the index was created with,
-// and `nextToken` is present while further pages remain.
 type QueryVectorsResponse record {
     QueryOutputVector[] vectors;
     string distanceMetric?;
     string nextToken?;
 };
 
-// One approximate-nearest-neighbour hit. Note there is no vector data here: `QueryVectors` has
-// no `returnData` parameter and never returns embeddings.
+// `QueryVectors` never returns vector data.
 type QueryOutputVector record {
     string key;
     float distance?;
     map<json> metadata?;
 };
 
-// The `ListVectors` response.
 type ListVectorsResponse record {
     ListOutputVector[] vectors;
     string nextToken?;
 };
 
-// One entry of a `ListVectors` page.
 type ListOutputVector record {
     string key;
     VectorData data?;
     map<json> metadata?;
 };
 
-// The `GetVectors` response, used only to hydrate embeddings when `returnVectorData` is set.
 type GetVectorsResponse record {
     GetOutputVector[] vectors;
 };
 
-// One entry of a `GetVectors` response.
 type GetOutputVector record {
     string key;
     VectorData data?;
     map<json> metadata?;
 };
 
-// A single failure within a `ValidationException`. AWS reports each offending field separately,
-// and the pair is far more actionable than the exception's summary message on its own.
 type ValidationExceptionField record {
     string path;
     string message;
 };
 
-// The body of an S3 Vectors error response. `rest-json` carries the error type in the
-// `x-amzn-errortype` header and/or a `__type` field, and the human-readable text in `message`;
-// only `ValidationException` adds `fieldList`.
+// The error type comes in the `x-amzn-errortype` header and/or `__type`.
 type ErrorResponse record {
     string message?;
     string __type?;

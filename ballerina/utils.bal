@@ -18,41 +18,24 @@ import ballerina/ai;
 import ballerina/jballerina.java;
 import ballerina/time;
 
-// How an object's content is turned into text, derived from its key/MIME type. Matches the
-// file types supported by `ballerina/ai`'s built-in `TextDataLoader` exactly: `md`/`html`/`htm`
-// and other natively-textual types are decoded directly; `pdf` is extracted with Tika and
-// `docx`/`pptx` with POI; the remaining Office formats are recognised only so they can be
-// rejected or skipped.
+// How an object's content is turned into text.
 enum DocumentKind {
-    // Inherently textual (md/html/htm/txt/csv/json/xml/yaml/…); decoded from its bytes.
     PLAIN_TEXT,
-    // A PDF document; text extracted via Tika's PDFParser.
     PDF,
-    // A Word document (.docx); text extracted via POI's XWPFWordExtractor.
     DOCX,
-    // A PowerPoint presentation (.pptx); text extracted via POI's SlideShowExtractor.
     PPTX,
-    // An Excel workbook (.xlsx); text extracted via POI's XSSFExcelExtractor.
     XLSX,
-    // An unsupported Microsoft Office format: the legacy binary ones (.doc/.ppt/.xls). They are
-    // skipped in prefix walks and rejected with a format-specific error when named explicitly.
+    // The legacy binary .doc/.ppt/.xls formats: recognised only to give a clear error.
     UNSUPPORTED_OFFICE,
-    // Cannot be represented as text (images, audio, unknown binary); skipped.
     UNSUPPORTED
 }
 
-// Builds an `ai:TextDocument` from an object's downloaded bytes: natively-textual content is
-// decoded directly, `pdf` is extracted with Tika, and `docx`/`pptx`/`xlsx` with POI. Returns `()` when
-// the object cannot be represented as text (unsupported Office, images, unknown binary),
-// signalling the caller to skip or reject it. `size` is the byte count S3 reported; `lastModified`
-// is parsed defensively — a blank or unparseable timestamp is omitted rather than failing the load.
+// Builds a text document from an object's bytes, or returns `()` when it can't be represented as
+// text.
 isolated function buildDocument(byte[] content, string bucket, string key, int size,
         string lastModified, string eTag, string? contentType = ()) returns ai:TextDocument?|ai:Error {
     ai:Metadata metadata = {fileName: baseName(key)};
-    // A clean, parameter-free MIME type derived from the key extension, or from the object's
-    // Content-Type when the extension is unknown. `ai`'s `guessChunker` matches
-    // `text/markdown`/`text/html` *exactly*, so a `; charset=...` suffix (which S3's Content-Type
-    // often carries) must never reach it.
+    // `ai`'s `guessChunker` matches `text/markdown`/`text/html` exactly, so no `; charset=...`.
     string? mimeType = mimeTypeForExtension(getExtension(key)) ?: bareMimeType(contentType);
     if mimeType is string {
         metadata.mimeType = mimeType;
@@ -62,8 +45,7 @@ isolated function buildDocument(byte[] content, string bucket, string key, int s
     if modifiedAt is time:Utc {
         metadata.modifiedAt = modifiedAt;
     }
-    // bucket/key/eTag are recorded as open metadata fields (quoted keys), the only way to
-    // extend `ai:Metadata`, whose declared fields are a fixed set.
+    // `ai:Metadata`'s declared fields are fixed, so these go in as open fields.
     metadata["bucket"] = bucket;
     metadata["key"] = key;
     if eTag != "" {
@@ -115,53 +97,37 @@ isolated function buildDocument(byte[] content, string bucket, string key, int s
     return ();
 }
 
-// A failed PDF or Office extraction is a problem with that one object (corrupt, encrypted, or past
-// a POI safety limit), so it is tagged recoverable: a prefix walk skips it with a warning, while a
-// named key still returns the error.
+// Extraction failures are specific to one object, so a prefix walk can skip them.
 isolated function extractionError(string bucket, string key, error cause) returns ai:Error =>
     error ai:Error(string `Failed to extract text from '${key}' in bucket '${bucket}': ${cause.message()}`,
             cause, recoverableInWalk = true);
 
-// Extracts plain text from a PDF document using Apache Tika's PDFParser, reading directly
-// from the in-memory bytes (no temporary file). `fileName` is passed as a Tika resource-name
-// hint. Dispatch is explicit — AutoDetectParser is never used — so Tika's container
-// detection (and its version-sensitive commons-compress probing) never runs.
+// Parser dispatch is explicit: Tika's AutoDetectParser is never used.
 isolated function extractPdfText(byte[] content, string fileName) returns string|error = @java:Method {
     'class: "io.ballerina.lib.ai.aws.s3.TextExtractor",
     name: "extractPdfText"
 } external;
 
-// Extracts plain text from a Word document (.docx) using POI's XWPFWordExtractor, reading the
-// OPC package straight from the in-memory bytes (no temporary file). Tika is bypassed for
-// OOXML on purpose: its OOXMLParser runs a zip-container detection pass that probes archive
-// formats through commons-compress, which both defeats the point of explicit dispatch and
-// breaks against the commons-lang3 the Ballerina runtime bundles (see TextExtractor.java).
+// POI is used directly: Tika's OOXMLParser probes archives through a commons-compress that
+// conflicts with the runtime's commons-lang3 (see TextExtractor.java).
 isolated function extractDocxText(byte[] content, string fileName) returns string|error = @java:Method {
     'class: "io.ballerina.lib.ai.aws.s3.TextExtractor",
     name: "extractDocxText"
 } external;
 
-// Extracts plain text from a PowerPoint presentation (.pptx) using POI's SlideShowExtractor,
-// reading straight from the in-memory bytes (no temporary file). See `extractDocxText` for why
-// Tika's OOXMLParser is not used.
 isolated function extractPptxText(byte[] content, string fileName) returns string|error = @java:Method {
     'class: "io.ballerina.lib.ai.aws.s3.TextExtractor",
     name: "extractPptxText"
 } external;
 
-// Extracts plain text from an Excel workbook (.xlsx) using POI's XSSFExcelExtractor, reading
-// straight from the in-memory bytes (no temporary file). Cells are rendered tab-separated, one
-// row per line, each sheet prefixed with its name. See `extractDocxText` for why Tika's
-// OOXMLParser is not used.
+// Cells are tab-separated, one row per line, and each sheet starts with its name.
 isolated function extractXlsxText(byte[] content, string fileName) returns string|error = @java:Method {
     'class: "io.ballerina.lib.ai.aws.s3.TextExtractor",
     name: "extractXlsxText"
 } external;
 
-// Classifies an object by its key extension, falling back to its Content-Type only when the
-// extension says nothing (e.g. an extensionless key). The extension wins otherwise, because S3
-// Content-Types are frequently generic or wrong (`binary/octet-stream`, a `.md` sent as
-// `text/plain`), while the extension is what the uploader named the file.
+// The extension decides when it's recognised, since S3 Content-Types are often generic or wrong;
+// the Content-Type is the fallback for keys without a known extension.
 isolated function classifyObject(string key, string? contentType) returns DocumentKind {
     DocumentKind kind = classify(key, ());
     if kind == UNSUPPORTED && contentType is string {
@@ -170,8 +136,7 @@ isolated function classifyObject(string key, string? contentType) returns Docume
     return kind;
 }
 
-// A Content-Type with its parameters (`; charset=...`) removed and lowercased, or `()` when
-// absent, blank, or the generic binary type that says nothing about the content.
+// The Content-Type without parameters, or `()` when it says nothing about the content.
 isolated function bareMimeType(string? contentType) returns string? {
     if contentType is () {
         return ();
@@ -181,20 +146,13 @@ isolated function bareMimeType(string? contentType) returns string? {
     return mime == "" || mime == "application/octet-stream" || mime == "binary/octet-stream" ? () : mime;
 }
 
-// Classifies an object by how its text is obtained, using MIME type (when known) then the
-// key extension. S3 object listings carry no Content-Type, so in practice classification is
-// by extension; the `mimeType` parameter is honoured when a caller has one.
+// Classifies by MIME type when one is given, then by extension.
 isolated function classify(string fileName, string? mimeType) returns DocumentKind {
-    // Drop any media-type parameters (e.g. "; charset=utf-8") before comparing against the bare
-    // MIME constants and tables, which hold no parameters.
     string rawMime = (mimeType ?: "").toLowerAscii();
     int? semicolon = rawMime.indexOf(";");
     string mime = (semicolon is int ? rawMime.substring(0, semicolon) : rawMime).trim();
     string extension = getExtension(fileName);
-    // A supplied MIME type is decided first, and on its own. Folding the extension into the same
-    // condition let the key win whenever it looked textual, so `classify("report.txt",
-    // "application/pdf")` returned PLAIN_TEXT — contradicting this function's own contract that an
-    // explicit MIME type is honoured. A caller that knows the media type knows better than the key.
+    // An explicit MIME type wins over the extension.
     if mime != "" {
         if mime.startsWith("text/") || TEXT_MIME_TYPES.indexOf(mime) !is () {
             return PLAIN_TEXT;
@@ -214,8 +172,7 @@ isolated function classify(string fileName, string? mimeType) returns DocumentKi
         if UNSUPPORTED_OFFICE_MIME_TYPES.indexOf(mime) !is () {
             return UNSUPPORTED_OFFICE;
         }
-        // An unrecognised MIME type carries no information, so fall through to the extension
-        // rather than declaring the object unsupported on the strength of a value we do not know.
+        // An unrecognised MIME type says nothing, so fall back to the extension.
     }
     if TEXT_EXTENSIONS.indexOf(extension) !is () {
         return PLAIN_TEXT;
@@ -232,19 +189,13 @@ isolated function classify(string fileName, string? mimeType) returns DocumentKi
     if extension == "xlsx" {
         return XLSX;
     }
-    // The remaining Office formats are recognised solely so they can be rejected with a clear
-    // message (named keys) or skipped (prefix walks) — the loader extracts text from PDF, .docx,
-    // .pptx and .xlsx only, not the legacy binary .doc/.ppt/.xls formats.
     if UNSUPPORTED_OFFICE_EXTENSIONS.indexOf(extension) !is () {
         return UNSUPPORTED_OFFICE;
     }
     return UNSUPPORTED;
 }
 
-// Drains a byte stream fully into memory, enforcing a size ceiling, and closes the stream on
-// every exit path (normal completion, ceiling exceeded, or a mid-read error) so no stream is
-// ever leaked. An object exceeding `maxBytes` fails with a clear `ai:Error` rather than risking
-// an out-of-memory condition; the over-limit chunk is never appended, so the bound is exact.
+// Reads a stream into memory up to `maxBytes`, closing it on every path.
 isolated function drainStream(stream<byte[], error?> objStream, int maxBytes, string bucket, string key)
         returns byte[]|ai:Error {
     byte[] content = [];
@@ -262,8 +213,7 @@ isolated function drainStream(stream<byte[], error?> objStream, int maxBytes, st
         total += next.value.length();
         if total > maxBytes {
             closeQuietly(objStream);
-            // The listed size was under the limit but the content is not, so this is still a
-            // per-object problem a prefix walk can skip.
+            // The reported size was within the limit but the content isn't; still per-object.
             return error ai:Error(string `Object '${key}' in bucket '${bucket}' exceeds the configured ` +
                 string `maximum size of ${maxBytes} bytes and was not read into memory.`, recoverableInWalk = true);
         }
@@ -278,21 +228,14 @@ isolated function drainStream(stream<byte[], error?> objStream, int maxBytes, st
     return content;
 }
 
-// Closes a stream, ignoring any close error. Used on error paths where the original error
-// is the one worth surfacing.
 isolated function closeQuietly(stream<byte[], error?> objStream) {
     error? closeResult = objStream.close();
     if closeResult is error {
-        // Intentionally ignored: a close failure must not mask the read/ceiling error.
+        // A close failure must not mask the original error.
     }
 }
 
-// Returns `content` with a leading UTF-8 byte-order mark (EF BB BF) removed, or `content`
-// unchanged when none is present. S3 objects exported from Excel/Windows tools carry a BOM;
-// left in place it decodes to a leading U+FEFF that pollutes embeddings and defeats the
-// first-character heuristics of `ai`'s Markdown/HTML chunkers. Only the 3 BOM bytes are dropped
-// — the object's actual content is never altered. (UTF-16/Windows-1252 encodings are not
-// decoded; an object in one of those fails to decode and is skipped during a prefix walk.)
+// Drops a leading UTF-8 byte-order mark, which would otherwise end up in the text.
 isolated function stripUtf8Bom(byte[] content) returns byte[] {
     if content.length() >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF {
         return content.slice(3);
@@ -300,17 +243,13 @@ isolated function stripUtf8Bom(byte[] content) returns byte[] {
     return content;
 }
 
-// Returns the last '/'-separated segment of a key (its "file name"), or the whole key
-// when it contains no '/'. Used so that a dot in a directory component (e.g.
-// "example.com/homepage") is never mistaken for a file extension.
+// The last '/'-separated segment of a key.
 isolated function baseName(string key) returns string {
     int? lastSlash = key.lastIndexOf("/");
     return lastSlash is () ? key : key.substring(lastSlash + 1);
 }
 
-// Returns the lower-cased extension of a key's last path segment (without the dot), or ""
-// if none. Only the segment after the final '/' is considered, so keys with a dotted
-// directory component (e.g. "example.com/homepage", "v1.2/README") are not misclassified.
+// Lower-cased extension of the key's last segment, so a dotted folder name isn't an extension.
 isolated function getExtension(string fileName) returns string {
     string name = baseName(fileName);
     int? lastDotIndex = name.lastIndexOf(".");
@@ -320,8 +259,7 @@ isolated function getExtension(string fileName) returns string {
     return name.substring(lastDotIndex + 1).toLowerAscii();
 }
 
-// Reports whether a key passes the extension allowlist (()/empty matches all). A leading
-// dot on an allowed entry is optional and matching is case-insensitive.
+// Case-insensitive; a leading dot on an allowed extension is optional. Empty allows everything.
 isolated function matchesExtensionFilter(string fileName, string[]? includeExtensions) returns boolean {
     if includeExtensions is () || includeExtensions.length() == 0 {
         return true;
@@ -339,7 +277,6 @@ isolated function matchesExtensionFilter(string fileName, string[]? includeExten
     return false;
 }
 
-// Parses an ISO 8601 timestamp into time:Utc, or () if absent/blank/unparseable.
 isolated function toUtc(string dateTime) returns time:Utc? {
     if dateTime.trim() == "" {
         return ();
@@ -348,13 +285,10 @@ isolated function toUtc(string dateTime) returns time:Utc? {
     return utc is time:Utc ? utc : ();
 }
 
-// Maps a key extension to a clean, parameter-free MIME type, or () when unknown. The
-// text/markdown and text/html values are set precisely so `ai`'s `guessChunker` routes
-// markup to its Markdown/HTML chunkers.
+// The text/markdown and text/html values route markup to `ai`'s Markdown/HTML chunkers.
 isolated function mimeTypeForExtension(string extension) returns string? => MIME_TYPES_BY_EXTENSION[extension];
 
-// MIME types (outside the `text/` family) treated as natively textual. Consulted only when a
-// caller supplies a MIME type; S3 listings carry none, so in practice extensions decide.
+// Non-`text/` MIME types that are decoded as text.
 final readonly & string[] TEXT_MIME_TYPES = [
     "application/json",
     "application/xml",
@@ -366,35 +300,26 @@ final readonly & string[] TEXT_MIME_TYPES = [
     "application/typescript"
 ];
 
-// Key extensions treated as natively textual (decoded directly, matching `ai`'s handling of
-// md/html/htm plus the natively-textual types S3 buckets hold constantly). `ts` is left out on
-// purpose: in S3 it is far more often an MPEG transport-stream video segment than TypeScript.
+// `ts` is left out: in S3 it is far more often a video segment than TypeScript.
 final readonly & string[] TEXT_EXTENSIONS = [
     "txt", "text", "md", "markdown", "csv", "tsv", "json", "xml", "html", "htm",
     "yaml", "yml", "log", "ini", "conf", "properties", "css", "js"
 ];
 
-// The Word (.docx) OOXML media type; extracted via POI's XWPFWordExtractor.
 const string DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-// The PowerPoint (.pptx) OOXML media type; extracted via POI's SlideShowExtractor.
 const string PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
-// The Excel (.xlsx) OOXML media type; extracted via POI's XSSFExcelExtractor.
 const string XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
-// Unsupported Microsoft Office MIME types, recognised only to reject/skip. These are the legacy
-// binary formats; their OOXML successors (.docx/.pptx/.xlsx) are all extracted.
 final readonly & string[] UNSUPPORTED_OFFICE_MIME_TYPES = [
     "application/msword",
     "application/vnd.ms-powerpoint",
     "application/vnd.ms-excel"
 ];
 
-// Unsupported Microsoft Office key extensions: the legacy binary formats only.
 final readonly & string[] UNSUPPORTED_OFFICE_EXTENSIONS = ["doc", "ppt", "xls"];
 
-// Extension-to-MIME-type table used for document metadata and chunker routing.
 final readonly & map<string> MIME_TYPES_BY_EXTENSION = {
     "md": "text/markdown",
     "markdown": "text/markdown",
