@@ -54,8 +54,8 @@ dependencies {
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
 }
 
 spotbugsMain {
@@ -65,7 +65,7 @@ spotbugsMain {
     ignoreFailures = true
     effort = SpotBugsEffort.MAX
     reportLevel = SpotBugsConfidence.LOW
-    reportsDir = file("$project.buildDir/reports/spotbugs")
+    reportsDir = layout.buildDirectory.dir("reports/spotbugs")
     def excludeFile = file("${rootDir}/build-config/spotbugs-exclude.xml")
     if (excludeFile.exists()) {
         it.excludeFilter = excludeFile
@@ -78,9 +78,9 @@ spotbugsMain {
 task validateSpotbugs() {
     doLast {
         if (spotbugsMain.reports.size() > 0 &&
-                spotbugsMain.reports[0].destination.exists() &&
-                spotbugsMain.reports[0].destination.text.readLines().size() > 0) {
-            spotbugsMain.reports[0].destination?.eachLine {
+                spotbugsMain.reports.text.destination.exists() &&
+                spotbugsMain.reports.text.destination.text.readLines().size() > 0) {
+            spotbugsMain.reports.text.destination?.eachLine {
                 println 'Failure: ' + it
             }
             throw new GradleException("Spotbugs rule violations were found.");
