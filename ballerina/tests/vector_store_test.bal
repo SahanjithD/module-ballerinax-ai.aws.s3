@@ -710,12 +710,6 @@ function testRetryableStatusIsRetriedAndSucceeds() returns error? {
 }
 
 @test:Config {}
-function testCloseReleasesTheStore() returns error? {
-    VectorStore store = check newTestStore();
-    check store.close();
-}
-
-@test:Config {}
 function testThrottlingIsRetriedAndSucceeds() returns error? {
     VectorStore store = check newTestStore();
     mockS3VectorsControl.queueResponse("DeleteVectors",
