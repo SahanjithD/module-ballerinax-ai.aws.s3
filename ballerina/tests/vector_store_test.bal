@@ -841,16 +841,10 @@ function testLargeRequestIsSignedAndSentOverHttp11WithContentLength() returns er
 }
 
 @test:Config {}
-function testQueryModeIsSentOnlyWhenSet() returns error? {
-    VectorStore defaultStore = check newTestStore();
+function testQueryModeIsNotSent() returns error? {
+    VectorStore store = check newTestStore();
     mockS3VectorsControl.queueResponse("QueryVectors", {body: {distanceMetric: "cosine", vectors: []}});
-    _ = check defaultStore.query({embedding: [0.1, 0.2], topK: 1});
-    map<json> defaultBody = <map<json>>mockS3VectorsControl.requestsFor("QueryVectors")[0];
-    test:assertFalse(defaultBody.hasKey("queryMode"), "Without queryMode the index's own mode must apply");
-
-    VectorStore enhancedStore = check newTestStore({validateIndexOnInit: false, queryMode: ENHANCED});
-    mockS3VectorsControl.queueResponse("QueryVectors", {body: {distanceMetric: "cosine", vectors: []}});
-    _ = check enhancedStore.query({embedding: [0.1, 0.2], topK: 1});
-    map<json> enhancedBody = <map<json>>mockS3VectorsControl.requestsFor("QueryVectors")[0];
-    test:assertEquals(enhancedBody["queryMode"], "ENHANCED");
+    _ = check store.query({embedding: [0.1, 0.2], topK: 1});
+    map<json> body = <map<json>>mockS3VectorsControl.requestsFor("QueryVectors")[0];
+    test:assertFalse(body.hasKey("queryMode"), "Queries must use the index's own mode");
 }
