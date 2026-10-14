@@ -564,9 +564,8 @@ isolated function testValidateVectorIndexRejectsEmptyNames() {
     VectorIndex[] badIndexes = [
         {vectorBucketName: "", indexName: "idx"},
         {vectorBucketName: "bucket", indexName: " "},
-        {indexArn: ""},
-        {},
-        {indexArn: "arn:aws:s3vectors:us-east-1:123456789012:bucket/b/index/i", indexName: "i"}
+        "",
+        " "
     ];
     foreach VectorIndex index in badIndexes {
         test:assertTrue(validateVectorIndex(index) is ai:Error,

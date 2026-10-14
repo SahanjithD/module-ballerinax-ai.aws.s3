@@ -51,26 +51,13 @@ final readonly & string[] STRING_METADATA_KEYS = ["mimeType", "fileName", "heade
 
 
 isolated function validateVectorIndex(VectorIndex index) returns ai:Error? {
-    string? indexArn = index.indexArn;
-    string? vectorBucketName = index.vectorBucketName;
-    string? indexName = index.indexName;
-    if indexArn is string {
-        if vectorBucketName is string || indexName is string {
-            return error ai:Error(
-                "The S3 Vectors index must be identified by either 'indexArn' alone, or by " +
-                "'vectorBucketName' and 'indexName' together — not both forms at once");
-        }
-        if indexArn.trim() == "" {
-            return error ai:Error("The S3 Vectors 'indexArn' must not be empty");
+    if index is IndexArn {
+        if index.trim() == "" {
+            return error ai:Error("The S3 Vectors index ARN must not be empty");
         }
         return;
     }
-    if vectorBucketName is () || indexName is () {
-        return error ai:Error(
-            "The S3 Vectors index must be identified by either 'indexArn', or by both " +
-            "'vectorBucketName' and 'indexName'");
-    }
-    if vectorBucketName.trim() == "" || indexName.trim() == "" {
+    if index.vectorBucketName.trim() == "" || index.indexName.trim() == "" {
         return error ai:Error("The S3 Vectors 'vectorBucketName' and 'indexName' must not be empty");
     }
 }
