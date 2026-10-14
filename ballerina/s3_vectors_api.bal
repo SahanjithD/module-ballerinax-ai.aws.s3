@@ -60,18 +60,15 @@ isolated function resolveServiceEndpoint(VectorStoreConnectionConfig config) ret
 
 // S3 Vectors rejects HTTP/2 and chunked bodies (a SigV4 body needs a Content-Length), so both
 // are pinned, as in the AWS SDKs. Transport retries stay off because `invoke` retries itself.
-isolated function toClientConfiguration(HttpConfig config) returns http:ClientConfiguration {
-    return {
-        httpVersion: http:HTTP_1_1,
-        http1Settings: {chunking: http:CHUNKING_NEVER},
-        timeout: config.timeout,
-        proxy: config?.proxy,
-        secureSocket: config?.secureSocket,
-        poolConfig: config?.poolConfig,
-        circuitBreaker: config?.circuitBreaker,
-        socketConfig: config.socketConfig,
-        responseLimits: config.responseLimits
-    };
+// Copies, so the caller's records are never written to.
+isolated function toClientConfiguration(http:ClientConfiguration config) returns http:ClientConfiguration {
+    http:ClientHttp1Settings http1Settings = {...config.http1Settings};
+    http1Settings.chunking = http:CHUNKING_NEVER;
+    http:ClientConfiguration result = {...config};
+    result.httpVersion = http:HTTP_1_1;
+    result.http1Settings = http1Settings;
+    result.retryConfig = ();
+    return result;
 }
 
 // Stops a provider's background refresh (assume-role, SSO) when `VectorStore.init` fails.

@@ -576,11 +576,21 @@ isolated function testValidateVectorIndexRejectsEmptyNames() {
 
 @test:Config {}
 isolated function testClientConfigurationPinsTransportSettings() {
-    http:ClientConfiguration config = toClientConfiguration({timeout: 12});
+    http:ClientConfiguration input = {
+        timeout: 12,
+        httpVersion: http:HTTP_2_0,
+        http1Settings: {chunking: http:CHUNKING_ALWAYS, keepAlive: http:KEEPALIVE_NEVER},
+        retryConfig: {count: 3}
+    };
+    http:ClientConfiguration config = toClientConfiguration(input);
     test:assertEquals(config.httpVersion, http:HTTP_1_1);
     test:assertEquals(config.http1Settings.chunking, http:CHUNKING_NEVER);
     test:assertEquals(config.retryConfig, ());
     test:assertEquals(config.timeout, 12d);
+    test:assertEquals(config.http1Settings.keepAlive, http:KEEPALIVE_NEVER);
+    // The caller's record is left as it was.
+    test:assertEquals(input.httpVersion, http:HTTP_2_0);
+    test:assertEquals(input.http1Settings.chunking, http:CHUNKING_ALWAYS);
 }
 
 @test:Config {}

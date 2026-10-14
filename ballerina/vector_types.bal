@@ -31,31 +31,7 @@ public type VectorStoreConnectionConfig record {|
     aws:EndpointConfig endpoint?;
 
     # Timeout, proxy, TLS and other HTTP client settings
-    HttpConfig httpConfig = {};
-|};
-
-# HTTP client settings for calls to S3 Vectors.
-public type HttpConfig record {|
-    # Seconds to wait for a response before the request times out
-    decimal timeout = 30;
-
-    # Proxy server to send requests through
-    http:ProxyConfig proxy?;
-
-    # TLS settings, such as a custom trust store
-    http:ClientSecureSocket secureSocket?;
-
-    # Limits on pooled connections
-    http:PoolConfiguration poolConfig?;
-
-    # Stops sending requests for a while after repeated failures
-    http:CircuitBreakerConfig circuitBreaker?;
-
-    # Low-level socket options
-    http:ClientSocketConfig socketConfig = {};
-
-    # Size limits for response status lines, headers and bodies
-    http:ResponseLimitConfigs responseLimits = {};
+    http:ClientConfiguration httpConfig = {};
 |};
 
 # The vector index to use. Give either `vectorBucketName` and `indexName` together, or `indexArn`.
