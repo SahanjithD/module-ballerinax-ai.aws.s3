@@ -46,8 +46,11 @@ public type VectorBucketIndex record {|
     string indexName;
 |};
 
-# Full ARN of a vector index. Needed to reach an index owned by another AWS account.
-public type IndexArn string;
+# A vector index identified by its ARN.
+public type IndexArn record {|
+    # Full index ARN. Needed to reach an index owned by another AWS account
+    string indexArn;
+|};
 
 # Vector store behaviour.
 public type VectorStoreConfig record {|
