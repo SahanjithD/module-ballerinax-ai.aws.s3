@@ -564,8 +564,8 @@ isolated function testValidateVectorIndexRejectsEmptyNames() {
     VectorIndex[] badIndexes = [
         {vectorBucketName: "", indexName: "idx"},
         {vectorBucketName: "bucket", indexName: " "},
-        "",
-        " "
+        {indexArn: ""},
+        {indexArn: " "}
     ];
     foreach VectorIndex index in badIndexes {
         test:assertTrue(validateVectorIndex(index) is ai:Error,

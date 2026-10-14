@@ -297,7 +297,7 @@ isolated function mapErrorResponse(string operation, int statusCode, http:Respon
 // Every data-plane operation takes either `indexArn`, or `vectorBucketName` and `indexName`.
 isolated function withIndexIdentifier(map<json> body, VectorIndex index) returns map<json> {
     if index is IndexArn {
-        body["indexArn"] = index;
+        body["indexArn"] = index.indexArn;
         return body;
     }
     body["vectorBucketName"] = index.vectorBucketName;

@@ -52,7 +52,7 @@ final readonly & string[] STRING_METADATA_KEYS = ["mimeType", "fileName", "heade
 
 isolated function validateVectorIndex(VectorIndex index) returns ai:Error? {
     if index is IndexArn {
-        if index.trim() == "" {
+        if index.indexArn.trim() == "" {
             return error ai:Error("The S3 Vectors index ARN must not be empty");
         }
         return;

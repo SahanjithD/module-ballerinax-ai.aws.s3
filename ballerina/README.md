@@ -470,7 +470,7 @@ used as given.
 | Form | Type | Example |
 |---|---|---|
 | Bucket and index name | `VectorBucketIndex` | `{vectorBucketName: "my-vector-bucket", indexName: "my-index"}` |
-| Index ARN | `IndexArn` (a `string`) | `"arn:aws:s3vectors:us-east-1:111122223333:bucket/my-vector-bucket/index/my-index"` |
+| Index ARN | `IndexArn` | `{indexArn: "arn:aws:s3vectors:us-east-1:111122223333:bucket/my-vector-bucket/index/my-index"}` |
 
 Use the ARN for an index owned by another AWS account, since names resolve in the caller's own
 account.

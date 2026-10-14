@@ -44,7 +44,7 @@ function newTestStore(VectorStoreConfig config = {validateIndexOnInit: false}) r
 @test:Config {}
 function testInitRejectsEmptyIndexArn() {
     VectorStore|ai:Error store = new (
-        {auth: {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"}, region: "us-east-1"}, " ");
+        {auth: {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"}, region: "us-east-1"}, {indexArn: " "});
     test:assertTrue(store is ai:Error, "A blank index ARN must be rejected");
 }
 
@@ -799,7 +799,7 @@ function testRequestsTargetTheIndexArnWhenGiven() returns error? {
             region: "us-east-1",
             endpoint: {customEndpoint: MOCK_SERVICE_URL}
         },
-        indexArn,
+        {indexArn},
         {validateIndexOnInit: false}
     );
     check store.delete("vec-1");
