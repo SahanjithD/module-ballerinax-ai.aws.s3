@@ -34,17 +34,20 @@ public type VectorStoreConnectionConfig record {|
     http:ClientConfiguration httpConfig = {};
 |};
 
-# The vector index to use. Give either `vectorBucketName` and `indexName` together, or `indexArn`.
-public type VectorIndex record {|
+# The vector index to use, by its bucket and index name or by its ARN.
+public type VectorIndex VectorBucketIndex|IndexArn;
+
+# A vector index identified by its bucket and index name.
+public type VectorBucketIndex record {|
     # Vector bucket that holds the index
-    string vectorBucketName?;
+    string vectorBucketName;
 
     # Index name within the vector bucket
-    string indexName?;
-
-    # Full index ARN. Needed to reach an index owned by another AWS account
-    string indexArn?;
+    string indexName;
 |};
+
+# Full ARN of a vector index. Needed to reach an index owned by another AWS account.
+public type IndexArn string;
 
 # Vector store behaviour.
 public type VectorStoreConfig record {|

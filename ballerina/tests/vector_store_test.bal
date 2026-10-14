@@ -42,18 +42,10 @@ function newTestStore(VectorStoreConfig config = {validateIndexOnInit: false}) r
 // ---------------------------------------------------------------------------
 
 @test:Config {}
-function testInitRejectsBothIndexArnAndBucketName() {
+function testInitRejectsEmptyIndexArn() {
     VectorStore|ai:Error store = new (
-        {auth: {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"}, region: "us-east-1"},
-        {vectorBucketName: TEST_VECTOR_BUCKET, indexName: TEST_INDEX, indexArn: "arn:aws:s3vectors:us-east-1:123456789012:bucket/b/index/i"});
-    test:assertTrue(store is ai:Error, "Supplying both indexArn and the bucket/index name pair must be rejected");
-}
-
-@test:Config {}
-function testInitRejectsNeitherIndexArnNorBucketName() {
-    VectorStore|ai:Error store = new (
-        {auth: {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"}, region: "us-east-1"}, {});
-    test:assertTrue(store is ai:Error, "The index must be identified one way or the other");
+        {auth: {accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret"}, region: "us-east-1"}, " ");
+    test:assertTrue(store is ai:Error, "A blank index ARN must be rejected");
 }
 
 @test:Config {}
@@ -807,7 +799,7 @@ function testRequestsTargetTheIndexArnWhenGiven() returns error? {
             region: "us-east-1",
             endpoint: {customEndpoint: MOCK_SERVICE_URL}
         },
-        {indexArn},
+        indexArn,
         {validateIndexOnInit: false}
     );
     check store.delete("vec-1");
