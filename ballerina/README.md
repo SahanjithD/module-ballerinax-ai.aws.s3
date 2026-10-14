@@ -456,13 +456,12 @@ check knowledgeBase.ingest(documents);
 | `auth` | `auth:AuthConfig` | — | Same credential shapes as the loader's `ConnectionConfig`; pass `auth:DEFAULT_CREDENTIALS` for the standard AWS provider chain |
 | `region` | `aws:Region \| string` | — | The region the vector bucket is in. **S3 Vectors is not available in every AWS region** |
 | `endpoint` | `aws:EndpointConfig?` | resolved from `region` | `customEndpoint` overrides the endpoint, e.g. for testing. `fips` must stay `false`: AWS publishes no FIPS endpoint for S3 Vectors. `dualstack` is ignored, since S3 Vectors has only dual-stack endpoints |
-| `httpConfig` | `HttpConfig` | `{}` | HTTP client settings; see below |
+| `httpConfig` | `http:ClientConfiguration` | `{}` | HTTP client settings, such as timeout, proxy and TLS; see below |
 
-`HttpConfig` exposes `timeout` (seconds, default 30), `proxy`, `secureSocket`, `poolConfig`,
-`circuitBreaker`, `socketConfig` and `responseLimits`, with the same meaning as in
-`http:ClientConfiguration`. The store always uses HTTP/1.1 with no chunked request bodies, because
-S3 Vectors rejects both HTTP/2 and chunked bodies, and it runs its own retries, re-signing each
-attempt, so those settings are not exposed.
+The store always sends HTTP/1.1 requests without chunked bodies, because S3 Vectors rejects both
+HTTP/2 and chunked bodies, and it runs its own retries, re-signing each attempt. So `httpVersion`,
+`http1Settings.chunking` and `retryConfig` in `httpConfig` are overridden; every other setting is
+used as given.
 
 #### Index (`VectorIndex`)
 
