@@ -319,17 +319,6 @@ public isolated class VectorStore {
         }
     }
 
-    # Releases the AWS credential provider, stopping any background credential refresh. Call it
-    # when the store is no longer needed.
-    #
-    # + return - An `ai:Error` if the provider could not be released
-    public isolated function close() returns ai:Error? {
-        error? result = self.credentialProvider.close();
-        if result is error {
-            return error ai:Error("Failed to close the S3 Vectors vector store", result);
-        }
-    }
-
     # Deletes vectors by id. Ids that are not in the index are ignored.
     #
     # + ids - The id, or ids, of the vectors to delete
