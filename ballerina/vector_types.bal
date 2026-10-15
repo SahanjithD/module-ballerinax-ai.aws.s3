@@ -52,6 +52,14 @@ public type IndexArn record {|
     string indexArn;
 |};
 
+# How S3 Vectors applies metadata filters in a query with an embedding.
+public enum QueryMode {
+    # Filters during the search. A filtered query can return fewer than `topK` matches
+    CLASSIC,
+    # Filters before the search, so a filtered query returns every match it can, up to `topK`
+    ENHANCED
+}
+
 # Vector store behaviour.
 public type VectorStoreConfig record {|
     # Metadata key that holds the chunk text. Must be declared non-filterable on the index
@@ -59,6 +67,9 @@ public type VectorStoreConfig record {|
 
     # Filters applied to every query, in addition to the query's own filters
     ai:MetadataFilters filters?;
+
+    # How filters are applied when querying by embedding. Unset uses the index's own mode
+    QueryMode queryMode?;
 
     # Whether query results include embeddings. Costs an extra `GetVectors` call per query
     boolean returnVectorData = false;

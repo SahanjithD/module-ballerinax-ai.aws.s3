@@ -481,6 +481,7 @@ account.
 |---|---|---|---|
 | `contentKey` | `string` | `"content"` | The metadata key chunk text is stored under. Must be declared non-filterable on the index — see above |
 | `filters` | `ai:MetadataFilters?` | `()` | Applied to every query, combined with any per-query filters under `AND` |
+| `queryMode` | `QueryMode?` | the index's mode | `CLASSIC` filters during the search; `ENHANCED` filters before it, so a filtered query isn't cut short. AWS rejects `CLASSIC` on an `ENHANCED` index |
 | `returnVectorData` | `boolean` | `false` | Whether `query` returns embeddings. `QueryVectors` never returns vector data, so this costs a follow-up `GetVectors` call per query |
 | `maxListScan` | `int` | `100000` | Cap on how many vectors a query without an embedding (the shape `deleteByFilter` issues) scans with `ListVectors` before failing |
 | `validateIndexOnInit` | `boolean` | `true` | Whether `init` reads the index with `GetIndex` and checks its dimension, metric and content key up front |
@@ -523,8 +524,8 @@ embedding, an untranslatable filter).
   large index.
 - **On a `CLASSIC` index, a filtered query with an embedding can return fewer than `topK`
   results**, because filters are applied during the approximate search. `ENHANCED` indexes (the
-  default for vector buckets created on or after 30 September 2026) filter first. Switch an older
-  index to `ENHANCED` with the S3 Vectors `UpdateIndexMode` operation to get that behaviour.
+  default for vector buckets created on or after 30 September 2026) filter first. Set
+  `VectorStoreConfig.queryMode` to `ENHANCED` to get that behaviour on an older index.
 - **An `ENHANCED` query allows at most 100 filter constraints.** Each compared value counts once,
   so an `IN` with five values counts five. S3 Vectors rejects a larger filter with a
   `ValidationException` naming the field.

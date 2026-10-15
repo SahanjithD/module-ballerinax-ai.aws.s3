@@ -333,7 +333,7 @@ isolated function deleteVectors(http:Client httpClient, auth:CredentialProvider 
 // One page of results; the caller resends the same query with `nextToken` for the next.
 isolated function queryVectors(http:Client httpClient, auth:CredentialProvider provider, string host,
         aws:Region|string region, VectorIndex index, json queryVector, int topK, json filter,
-        string? nextToken) returns QueryVectorsResponse|ai:Error {
+        QueryMode? queryMode, string? nextToken) returns QueryVectorsResponse|ai:Error {
     map<json> body = {
         "queryVector": queryVector,
         topK,
@@ -342,6 +342,10 @@ isolated function queryVectors(http:Client httpClient, auth:CredentialProvider p
     };
     if filter !is () {
         body["filter"] = filter;
+    }
+    // Unset means the index's own mode; AWS rejects `CLASSIC` on an `ENHANCED` index.
+    if queryMode is QueryMode {
+        body["queryMode"] = queryMode;
     }
     if nextToken is string {
         body["nextToken"] = nextToken;
