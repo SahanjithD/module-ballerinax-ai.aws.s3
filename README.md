@@ -1,20 +1,21 @@
-# Ballerina AWS S3 Data Loader
+# Ballerina AWS S3 Data Loader and S3 Vectors Vector Store
 
 [![Build](https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3/actions/workflows/ci.yml/badge.svg)](https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3/actions/workflows/ci.yml)
-[![Trivy](https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3/actions/workflows/trivy-scan.yml/badge.svg)](https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3/actions/workflows/trivy-scan.yml)
 [![GitHub Last Commit](https://img.shields.io/github/last-commit/ballerina-platform/module-ballerinax-ai.aws.s3.svg?label=Last%20Commit)](https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3/commits/main)
 [![GitHub Issues](https://img.shields.io/github/issues/ballerina-platform/ballerina-library/module/ai.aws.s3.svg?label=Open%20Issues)](https://github.com/ballerina-platform/ballerina-library/labels/module%2Fai.aws.s3)
 
-The `ballerinax/ai.aws.s3` package provides a `TextDataLoader` that reads objects from
-[AWS S3](https://aws.amazon.com/s3/) buckets and returns them as `ai:TextDocument` values, ready to
-be chunked, embedded, and indexed by the [Ballerina AI](https://central.ballerina.io/ballerina/ai)
-module.
+The `ballerinax/ai.aws.s3` package provides two building blocks for RAG pipelines on AWS,
+implementing the corresponding [Ballerina AI](https://central.ballerina.io/ballerina/ai)
+abstractions so both can be used anywhere those are expected:
 
-It implements the `ai:DataLoader` abstraction, so it can be used anywhere an `ai:DataLoader` is
-expected — for example, in a retrieval-augmented generation (RAG) ingestion pipeline.
-Natively-textual objects are decoded directly, while PDF, Word (`.docx`), PowerPoint (`.pptx`) and
-Excel (`.xlsx`) documents have their text extracted **in memory** with Apache Tika and Apache POI —
-object content is never written to disk.
+- **`TextDataLoader`** (`ai:DataLoader`) reads objects from [AWS S3](https://aws.amazon.com/s3/)
+  buckets and returns them as `ai:TextDocument` values. Natively-textual objects are decoded
+  directly, while PDF, Word (`.docx`), PowerPoint (`.pptx`) and Excel (`.xlsx`) documents have
+  their text extracted **in memory** with Apache Tika and Apache POI — object content is never
+  written to disk.
+- **`VectorStore`** (`ai:VectorStore`) stores and queries vector embeddings in an
+  [Amazon S3 Vectors](https://aws.amazon.com/s3/features/vectors/) index — AWS's own vector
+  storage and similarity-search service.
 
 For the full API, configuration reference, supported file types, and usage guide, see the
 [package documentation](ballerina/README.md).
@@ -31,21 +32,34 @@ Please read these before indexing a large or busy bucket.
   but a paginated load is not an atomic snapshot: concurrent writes across page requests can cause
   objects to be missed or double-counted.
 - **Each object is read entirely into memory,** so that no temporary file is ever written.
-  `maxObjectSize` (default 100 MiB) bounds each individual object read; an object larger than that is
-  a clear error rather than an attempted load.
+  `maxObjectSize` (default 100 MiB) bounds each object; a larger one is skipped during a prefix
+  walk and is an error when named as a key.
 - **Non-recursive filtering** — `recursive: false` lists with delimiter `/`, so S3 returns only
   same-level keys (descendants roll into `CommonPrefixes`, which the connector drops); a client-side
   filter stays as a backstop.
-- **No `versionId` selection, no requester-pays, AWS endpoints only.** The loader reads current
-  object versions; requester-pays buckets and S3-compatible endpoints (MinIO, LocalStack, R2) are
-  not supported by the connector's configuration.
+- **No `versionId` selection, no requester-pays.** The loader reads current object versions, and
+  the connector's configuration has no requester-pays option.
 - **Legacy binary Office formats are unsupported** (`.doc`, `.ppt`, `.xls`). Convert them to their
   OOXML successors (`.docx`/`.pptx`/`.xlsx`) or PDF. The OOXML formats, including `.xlsx`, are
   extracted; a spreadsheet is rendered as tab-separated cells, one row per line, each sheet prefixed
   with its name.
-- **All buckets in one loader share one region**, since `region` is set on the connection.
-- **One unreadable object fails the whole load** — deliberately, since a silently incomplete RAG
-  index is worse than a failed one. Objects of unsupported *types* are skipped, not failed.
+- **Scanned or image-only documents are not supported.** There is no OCR, so they yield no text.
+- **All buckets in one loader share one connection**, including its region.
+- **During a prefix walk, objects that can't be loaded are skipped** with a logged warning
+  (unsupported, archived, over-sized, unparseable, or deleted after listing). The same objects named
+  as exact keys are an error. Permission and connection failures fail the whole load.
+
+`VectorStore` has its own set of limitations, described in full in the
+[package documentation](ballerina/README.md#limitations-1):
+
+- **Dense, text-only vectors.** No sparse/hybrid embeddings; `chunk.content` must be a `string`.
+- **The content metadata key must be declared non-filterable when the index is created** —
+  immutable afterwards, and easy to get wrong without reading the docs first.
+- **A query with no embedding scans the whole index** via `ListVectors`, since `QueryVectors`
+  cannot filter without a query vector. This is what makes `deleteByFilter` work at all, but it's
+  O(index size).
+- **No S3 Vectors emulator exists**, so its test suite runs against an in-process mock HTTP
+  service rather than a live endpoint or LocalStack.
 
 ## Issues and projects
 
@@ -59,7 +73,7 @@ This repository only contains the source code for the package.
 
 ### Prerequisites
 
-1. Download and install Java SE Development Kit (JDK) version 21 (from one of the following locations).
+1. Download and install Java SE Development Kit (JDK) version 25 (from one of the following locations).
 
    - [Oracle](https://www.oracle.com/java/technologies/downloads/)
    - [OpenJDK](https://adoptium.net/)
@@ -75,9 +89,8 @@ This repository only contains the source code for the package.
 
    > **Note:** These credentials are required because the Ballerina Gradle plugin
    > (`io.ballerina.plugin`) is published to GitHub Packages, which requires authentication even
-   > for public packages. Without them the Gradle build cannot resolve the plugin. See
-   > [docs/TESTING.md](docs/TESTING.md) for how to build and test using the `bal` CLI directly if
-   > you do not have a token.
+   > for public packages. Without them the Gradle build cannot resolve the plugin. Once the native
+   > jar has been built, `bal test` in the `ballerina` directory runs the tests without Gradle.
 
 ### Build options
 

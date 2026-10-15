@@ -1,19 +1,19 @@
 [package]
-distribution = "2201.12.0"
+distribution = "2201.14.0"
 org = "ballerinax"
 name = "ai.aws.s3"
 version = "1.0.0"
 license = ["Apache-2.0"]
 icon = "icon.png"
 authors = ["Ballerina"]
-keywords = ["Vendor/Amazon", "Cloud/Object Storage", "Area/AI & Machine Learning", "Type/Data Loader", "s3"]
+keywords = ["Vendor/Amazon", "Cloud/Object Storage", "Area/AI & Machine Learning", "Type/Data Loader", "Type/Vector Store", "s3", "vector", "vector store", "vector search", "Name/AWS S3"]
 repository = "https://github.com/ballerina-platform/module-ballerinax-ai.aws.s3"
 
-[platform.java21]
-graalvmCompatible = true
+[platform.java25]
+graalvmCompatible = false
 
 # Native in-memory text extractor (Apache Tika) for this package.
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "io.ballerina.lib"
 artifactId = "ai.aws.s3-native"
 version = "1.0.0"
@@ -22,56 +22,63 @@ path = "../native/build/libs/ai.aws.s3-native-1.0.0-SNAPSHOT.jar"
 # Apache Tika: the PDF parser module only. Dispatch is explicit (PDFParser) — Tika's
 # AutoDetectParser is never used. The OOXML formats are handled by POI directly rather than
 # by Tika's OOXMLParser; see the note on commons-compress below and TextExtractor.java.
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.tika"
 artifactId = "tika-core"
 version = "3.2.2"
 
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.tika"
 artifactId = "tika-parser-pdf-module"
 version = "3.2.2"
 
+# XMP metadata support for the PDF module. PDFParser reads a PDF's XMP packet through this jar,
+# so without it any PDF carrying XMP metadata (PDF/A, Adobe output) fails to parse.
+[[platform.java25.dependency]]
+groupId = "org.apache.tika"
+artifactId = "tika-parser-xmp-commons"
+version = "3.2.2"
+
 # Apache POI: OOXML (.docx/.pptx) parsing and text extraction.
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.poi"
 artifactId = "poi"
 version = "5.4.1"
 
 
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.poi"
 artifactId = "poi-ooxml"
 version = "5.4.1"
 
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.poi"
 artifactId = "poi-ooxml-lite"
 version = "5.4.1"
 
 # Apache PDFBox (PDF parsing, used by the Tika PDF module).
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.pdfbox"
 artifactId = "pdfbox"
 version = "3.0.5"
 
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.pdfbox"
 artifactId = "pdfbox-io"
 version = "3.0.5"
 
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.pdfbox"
 artifactId = "fontbox"
 version = "3.0.5"
 
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.pdfbox"
 artifactId = "jempbox"
 version = "1.8.17"
 
 # Commons IO, required by Tika/PDFBox.
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "commons-io"
 artifactId = "commons-io"
 version = "2.20.0"
@@ -84,29 +91,29 @@ version = "2.20.0"
 # the Ballerina runtime (ballerina-rt) bundles a shaded commons-lang3 3.14.0 that wins on the
 # classpath. With 1.28.0, .pptx extraction fails at runtime with a NoSuchMethodError; declaring
 # a newer commons-lang3 does not help, because the runtime's copy takes precedence.
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.commons"
 artifactId = "commons-compress"
 version = "1.27.1"
 
 # Remaining POI transitive requirements (collections, logging, XMLBeans, bitset).
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.commons"
 artifactId = "commons-collections4"
 version = "4.4"
 
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.logging.log4j"
 artifactId = "log4j-api"
-version = "2.25.4"
+version = "2.26.1"
 
 
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "org.apache.xmlbeans"
 artifactId = "xmlbeans"
 version = "5.3.0"
 
-[[platform.java21.dependency]]
+[[platform.java25.dependency]]
 groupId = "com.zaxxer"
 artifactId = "SparseBitSet"
 version = "1.3"

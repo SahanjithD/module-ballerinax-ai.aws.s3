@@ -17,6 +17,8 @@
  */
 
 plugins {
+    id "com.github.spotbugs-base"
+    id 'de.undercouch.download'
     id 'net.researchgate.release'
 }
 
@@ -57,11 +59,18 @@ allprojects {
 
 def moduleVersion = project.version.replace("-SNAPSHOT", "")
 
-task build {
-    dependsOn(':ai.aws.s3-ballerina:build')
+if (tasks.names.contains('build')) {
+    tasks.named('build') {
+        dependsOn(':ai.aws.s3-ballerina:build')
+    }
+} else {
+    tasks.register('build') {
+        dependsOn(':ai.aws.s3-ballerina:build')
+    }
 }
 
 release {
+    failOnPublishNeeded = false
     buildTasks = ['build']
     failOnSnapshotDependencies = true
     versionPropertyFile = 'gradle.properties'

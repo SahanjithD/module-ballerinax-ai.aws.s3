@@ -77,31 +77,29 @@ isolated function testInitAcceptsAPrebuiltClient() returns error? {
 
 @test:Config {}
 isolated function testInitAcceptsDefaultCredentialsConfigShape() {
-    // The default AWS credential chain (env vars, ECS/EC2 instance profiles, ...) is selected
-    // with `auth:DEFAULT_CREDENTIALS` (from `ballerinax/aws.auth`). Where the chain cannot resolve
-    // credentials this must surface as a clean ai:Error, never a panic.
+    // An unresolvable credential chain must give a wrapped ai:Error, never a panic.
     TextDataLoader|ai:Error loader =
         new ({auth: auth:DEFAULT_CREDENTIALS, region: "us-east-1"}, [{bucket: TEST_BUCKET}]);
-    if loader is ai:Error {
-        test:assertTrue(loader.message().startsWith("Failed to initialize the AWS S3 client:"),
-                "A credential-chain failure must be wrapped, got: " + loader.message());
-    }
+    test:assertTrue(loader is TextDataLoader || loader.message().startsWith("Failed to initialize the AWS S3 client:"),
+            "The chain must either build a loader or fail with a wrapped error");
+}
+
+@test:Config {}
+isolated function testInitRejectsEmptyPaths() {
+    TextDataLoader|ai:Error loader = new (testConnection(), [{bucket: TEST_BUCKET, paths: []}]);
+    test:assertTrue(loader is ai:Error, "An empty paths list must be rejected rather than load nothing");
 }
 
 // ---------------------------------------------------------------------------
 // Prefix-walk filtering: placeholders, recursion, extension allowlist
 //
-// `includeInPrefixWalk` is the decision the loader applies to every key it lists, so testing
-// it directly covers the traversal rules without needing a live listing.
 // ---------------------------------------------------------------------------
 
 isolated function item(string key, int size = 10) returns S3Item => {key, size};
 
 @test:Config {}
 isolated function testFolderPlaceholdersAreSkipped() {
-    // The S3 console creates zero-byte keys ending in '/' to fake folders. Two of these are
-    // named so they *would* classify as supported text types if the trailing-slash rule were
-    // removed, which is what binds this test to the placeholder rule specifically.
+    // Two of these would classify as text without the trailing-slash rule.
     test:assertFalse(includeInPrefixWalk(item("docs/", 0), "docs/", true, ()),
             "A bare folder placeholder must be skipped");
     test:assertFalse(includeInPrefixWalk(item("docs/notes.md/", 0), "docs/", true, ()),
@@ -185,8 +183,6 @@ isolated function testMatchesExtensionFilterDirectly() {
 // ---------------------------------------------------------------------------
 // Per-object skip/reject screening: storage class, size, recoverable errors
 //
-// These pure helpers drive the "skip in a prefix walk, reject a named key" split, so testing
-// them directly covers the decision without needing a live listing.
 // ---------------------------------------------------------------------------
 
 @test:Config {}
@@ -235,21 +231,17 @@ isolated function testStripUtf8BomOnlyRemovesTheBom() {
 @test:Config {}
 isolated function testUtf8BomIsStrippedFromDecodedContent() returns error? {
     // A UTF-8 BOM prepended to real content must vanish from the decoded text, while every
-    // content byte survives verbatim. The log line makes the before/after visible in the run.
+    // content byte survives verbatim.
     byte[] withBom = [0xEF, 0xBB, 0xBF];
     withBom.push(..."# Title".toBytes());
     ai:TextDocument doc = check buildDocument(withBom, TEST_BUCKET, "docs/bom.md", 10, "", "").ensureType();
     string content = contentOf(doc);
-    io:println(string `[BOM test] input bytes=${withBom.length()} (${withBom.toString()}), ` +
-            string `decoded content=${content.toJsonString()} (${content.length()} chars)`);
     test:assertEquals(content, "# Title", "The content must be preserved exactly, only the BOM removed");
     test:assertFalse(content.startsWith("\u{FEFF}"), "No leading U+FEFF may remain");
     test:assertEquals(content.length(), 7, "The 3 BOM bytes are gone; the 7 content characters remain");
 }
 
-// Each natively-textual type routes through the same PLAIN_TEXT decode, so a BOM must be
-// stripped identically for every one of them. Binary types (pdf/docx/pptx) never reach that
-// branch, so the BOM inside their bytes is (correctly) left to the parser.
+// Every natively-textual type goes through the same decode, so each must lose the BOM.
 @test:Config {
     dataProvider: bomTextTypes
 }
@@ -258,8 +250,6 @@ isolated function testUtf8BomIsStrippedAcrossTextTypes(string key, string body) 
     withBom.push(...body.toBytes());
     ai:TextDocument doc = check buildDocument(withBom, TEST_BUCKET, key, 10, "", "").ensureType();
     string content = contentOf(doc);
-    io:println(string `[BOM test] key=${key}: input ${withBom.length()} bytes -> ` +
-            string `content=${content.toJsonString()} (${content.length()} chars)`);
     test:assertEquals(content, body, key + ": content must survive verbatim, only the BOM removed");
     test:assertFalse(content.startsWith("\u{FEFF}"), key + ": no leading U+FEFF may remain");
 }
