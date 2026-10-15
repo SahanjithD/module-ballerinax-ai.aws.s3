@@ -37,6 +37,7 @@ public isolated class VectorStore {
     private final readonly & VectorIndex index;
     private final string contentKey;
     private final (readonly & ai:MetadataFilters)? filters;
+    private final QueryMode? queryMode;
     private final boolean returnVectorData;
     private final int maxListScan;
     // `()` when `validateIndexOnInit` is false; the checks that need them are then skipped.
@@ -84,6 +85,7 @@ public isolated class VectorStore {
         self.contentKey = config.contentKey;
         ai:MetadataFilters? configFilters = config.filters;
         self.filters = configFilters is ai:MetadataFilters ? configFilters.cloneReadOnly() : ();
+        self.queryMode = config?.queryMode;
         self.returnVectorData = config.returnVectorData;
         self.maxListScan = config.maxListScan;
 
@@ -212,7 +214,7 @@ public isolated class VectorStore {
         string? nextToken = ();
         while true {
             QueryVectorsResponse page = check queryVectors(self.httpClient, self.credentialProvider, self.host,
-                    self.region, self.index, queryVectorJson, requestedTopK, filterJson, nextToken);
+                    self.region, self.index, queryVectorJson, requestedTopK, filterJson, self.queryMode, nextToken);
             string metric = page.distanceMetric ?: (self.distanceMetric ?: "cosine");
             foreach QueryOutputVector item in page.vectors {
                 ai:Chunk|ai:Error chunk = metadataToChunk(item.metadata ?: {}, self.contentKey);
